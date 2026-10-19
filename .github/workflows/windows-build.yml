@@ -1,0 +1,56 @@
+name: Build Finance Ledger for Windows
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2025
+    timeout-minutes: 25
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+          architecture: 'x64'
+      - name: Install build dependencies
+        run: python -m pip install -r requirements-build.txt
+      - name: Test financial rules, exports and recovery
+        run: python -m unittest discover -s tests -v
+      - name: Smoke-test desktop pages and transaction forms
+        run: python scripts/gui_smoke.py
+      - name: Build windowed one-folder executable
+        run: python -m PyInstaller --clean --noconfirm FinanceLedger.spec
+      - name: Compile Windows installer
+        run: |
+          $compiler = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'
+          if (-not (Test-Path $compiler)) { throw 'Inno Setup 6 compiler is missing from the Windows runner.' }
+          & $compiler packaging\installer.iss
+          if ($LASTEXITCODE -ne 0) { throw 'Installer compilation failed.' }
+      - name: Verify expected build outputs
+        run: |
+          if (-not (Test-Path 'dist\FinanceLedger\FinanceLedger.exe')) { throw 'Application executable missing.' }
+          if (-not (Test-Path 'dist-installer\FinanceLedger-Setup.exe')) { throw 'Installer executable missing.' }
+          Get-FileHash dist-installer\FinanceLedger-Setup.exe -Algorithm SHA256 | Format-List
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: FinanceLedger-Windows-Installer
+          path: dist-installer/FinanceLedger-Setup.exe
+          if-no-files-found: error
+          retention-days: 30
+      - name: Upload portable one-folder application
+        uses: actions/upload-artifact@v4
+        with:
+          name: FinanceLedger-Windows-Portable
+          path: dist/FinanceLedger/
+          if-no-files-found: error
+          retention-days: 30
