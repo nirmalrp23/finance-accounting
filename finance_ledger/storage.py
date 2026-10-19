@@ -29,11 +29,11 @@ class InstanceLock:
     """OS-owned lock: automatically released on crash; no stale PID guessing."""
     def __init__(self, directory):
         Path(directory).mkdir(parents=True, exist_ok=True)
-        self.file = open(Path(directory) / 'application.lock', 'a+b')
-        self.file.seek(0)
-        if not self.file.read(1):
-            self.file.write(b'0')
-            self.file.flush()
+        # Windows byte-range locks deny reads as well as writes. Do not read
+        # or initialise the file before acquiring its lock: that would raise a
+        # raw PermissionError in the second instance. Locking beyond EOF is
+        # supported, so an empty lock file works without any payload.
+        self.file = open(Path(directory) / 'application.lock', 'a+b', buffering=0)
         self.file.seek(0)
         try:
             if sys.platform == 'win32':

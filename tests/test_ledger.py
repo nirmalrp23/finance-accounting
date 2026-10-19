@@ -315,6 +315,27 @@ class LedgerCase(unittest.TestCase):
         result=subprocess.run([sys.executable,'-c',code,self.temp.name],capture_output=True,text=True)
         self.assertEqual(result.returncode,42,result.stderr)
 
+    def test_instance_lock_released_when_process_terminates(self):
+        directory=str(Path(self.temp.name)/'crash-lock-test')
+        code=("from finance_ledger.storage import Database\n"
+              "import sys\n"
+              "db=Database(sys.argv[1],daily=False)\n"
+              "print('ready',flush=True)\n"
+              "sys.stdin.readline()\n")
+        process=subprocess.Popen([sys.executable,'-c',code,directory],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+        try:
+            self.assertEqual(process.stdout.readline().strip(),'ready')
+            with self.assertRaises(AlreadyRunning):
+                Database(directory,daily=False)
+            process.terminate()
+            process.wait(timeout=10)
+            reopened=Database(directory,daily=False)
+            reopened.close()
+        finally:
+            if process.poll() is None:
+                process.kill(); process.wait(timeout=10)
+            process.communicate(timeout=10)
+
     def test_updates_preserve_records_and_backup_before_migration(self):
         self.post('fd_received',1000)
         self.db.close()
