@@ -168,7 +168,7 @@ class Ledger:
                       idempotency_key, particulars='', party_id=None,
                       finance_id=None, new_party=None, new_finance=None,
                       interest_paise=0, category_id=None, method='cash',
-                      external_ref='', notes='', transfer_to=None):
+                      external_ref='', notes='', transfer_to=None, place_name=''):
         """One intake: party, finance account and posting commit or roll back together.
 
         The intake fingerprint is checked before any master records are created,
@@ -196,6 +196,7 @@ class Ledger:
                        finance_id=finance_id, new_party=new_party, new_finance=new_finance,
                        interest_paise=interest_paise, category_id=category_id,
                        method=method, external_ref=external_ref, notes=notes, transfer_to=transfer_to)
+        if place_name.strip(): request['place_name'] = place_name.strip()
         fingerprint = hashlib.sha256(json.dumps(request, sort_keys=True).encode()).hexdigest()
         with self.db.atomic():
             existing = self.db.one('SELECT * FROM posting_groups WHERE idempotency_key=?', (idempotency_key,))
@@ -231,15 +232,16 @@ class Ledger:
                              idempotency_key=idempotency_key, party_id=party_id,
                              finance_id=finance_id, category_id=category_id, method=method,
                              external_ref=external_ref, notes=notes, transfer_to=transfer_to,
-                             particulars=particulars.strip(), intake_fingerprint=fingerprint)
+                             particulars=particulars.strip(), intake_fingerprint=fingerprint, place_name=place_name.strip())
 
-    def post(self, *, tx_date, components, cash_id, idempotency_key, party_id=None, finance_id=None, category_id=None, method='cash', external_ref='', notes='', transfer_to=None, particulars='', intake_fingerprint=''):
+    def post(self, *, tx_date, components, cash_id, idempotency_key, party_id=None, finance_id=None, category_id=None, method='cash', external_ref='', notes='', transfer_to=None, particulars='', intake_fingerprint='', place_name=''):
         valid_date(tx_date)
         if not components or not idempotency_key or method not in METHODS:
             raise ValueError('Choose a transaction type, payment method and a submission key.')
         if len(components) > 2:
             raise ValueError('At most two linked payment components are allowed.')
         payload = dict(tx_date=tx_date,components=components,cash_id=cash_id,party_id=party_id,finance_id=finance_id,category_id=category_id,method=method,external_ref=external_ref,notes=notes,transfer_to=transfer_to,particulars=particulars,intake_fingerprint=intake_fingerprint)
+        if place_name.strip(): payload['place_name'] = place_name.strip()
         fingerprint = hashlib.sha256(json.dumps(payload,sort_keys=True).encode()).hexdigest()
         with self.db.atomic():
             existing = self.db.one('SELECT * FROM posting_groups WHERE idempotency_key=?', (idempotency_key,))
@@ -274,7 +276,7 @@ class Ledger:
                 if not target or tx_date < target['opening_date']:
                     raise ValueError('Transfer destination is unavailable on this date.')
             group_id = str(uuid.uuid4())
-            self.db.conn.execute('INSERT INTO posting_groups(id,reference,idempotency_key,fingerprint,tx_date,method,external_ref,notes,created_by,created_at,particulars,intake_fingerprint) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)', (group_id, 'TX-'+uuid.uuid4().hex[:12].upper(),idempotency_key,fingerprint,tx_date,method,external_ref,notes,getpass.getuser(),timestamp(),particulars,intake_fingerprint))
+            self.db.conn.execute('INSERT INTO posting_groups(id,reference,idempotency_key,fingerprint,tx_date,method,external_ref,notes,created_by,created_at,particulars,intake_fingerprint,place_name) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)', (group_id, 'TX-'+uuid.uuid4().hex[:12].upper(),idempotency_key,fingerprint,tx_date,method,external_ref,notes,getpass.getuser(),timestamp(),particulars,intake_fingerprint,place_name.strip()))
             for type_key, amount in components:
                 self._integer(amount)
                 spec = TYPES.get(type_key)
@@ -328,7 +330,7 @@ class Ledger:
                 if self.db.one('SELECT status FROM finance_accounts WHERE id=?', (account_id,))['status'] == 'closed':
                     raise ValueError('Reopen the closed finance account before reversing.')
             reversal_id = str(uuid.uuid4())
-            self.db.conn.execute('INSERT INTO posting_groups(id,reference,idempotency_key,fingerprint,tx_date,method,notes,reversal_of,created_by,created_at,particulars) VALUES(?,?,?,?,?,?,?,?,?,?,?)', (reversal_id,'RV-'+uuid.uuid4().hex[:12].upper(),idempotency_key,group_id,tx_date,original['method'],reason,group_id,getpass.getuser(),timestamp(),original['particulars']))
+            self.db.conn.execute('INSERT INTO posting_groups(id,reference,idempotency_key,fingerprint,tx_date,method,notes,reversal_of,created_by,created_at,particulars,place_name) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)', (reversal_id,'RV-'+uuid.uuid4().hex[:12].upper(),idempotency_key,group_id,tx_date,original['method'],reason,group_id,getpass.getuser(),timestamp(),original['particulars'],original['place_name']))
             for e in entries:
                 self._entry(reversal_id,e['cash_id'],e['party_id'],e['finance_id'],e['category_id'],e['type'],e['amount_paise'],-1)
             for account_id in finance_ids:
@@ -344,7 +346,7 @@ class Ledger:
         for key, column in {'party_id':'e.party_id','finance_id':'e.finance_id','cash_id':'e.cash_id','type':'e.type','category_id':'e.category_id','module':'f.module','status':'f.status'}.items():
             if filters.get(key) not in (None,''):
                 where.append(column+'=?'); args.append(filters[key])
-        query = '''SELECT e.*, g.reference,g.tx_date,g.method,g.external_ref,g.notes,g.particulars,g.created_by,g.created_at,g.reversal_of,
+        query = '''SELECT e.*, g.reference,g.tx_date,g.method,g.external_ref,g.notes,g.particulars,g.place_name,g.created_by,g.created_at,g.reversal_of,
         p.name party_name,f.reference finance_reference,f.module,f.status,c.name cash_name,cat.name category_name,
         (SELECT r.reference FROM posting_groups r WHERE r.reversal_of=g.id) reversed_by
         FROM entries e JOIN posting_groups g ON g.id=e.group_id

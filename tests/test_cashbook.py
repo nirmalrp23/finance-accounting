@@ -33,6 +33,23 @@ class CashbookCase(unittest.TestCase):
         self.assertEqual(self.ledger.cash_balance(self.cash,'2026-01-31'),9_000_000)
         self.assertEqual(self.db.one('SELECT COUNT(*) n FROM audit_log')['n'],4)
 
+    def test_entry_place_is_independent_audited_reversible_and_backed_up(self):
+        request=self.request | {'place_name':'  Salem  '}
+        group=self.ledger.post_cashbook(**request)
+        self.assertEqual(self.ledger.post_cashbook(**request),group)
+        with self.assertRaisesRegex(ValueError,'different values'):
+            self.ledger.post_cashbook(**(request | {'place_name':'Chennai'}))
+        self.assertEqual(self.ledger.entries()[0]['place_name'],'Salem')
+        self.assertEqual(self.ledger.parties()[0]['address'],'')
+        self.assertIn('Salem',self.db.one("SELECT after_json FROM audit_log WHERE entity='transaction' AND action='post'")['after_json'])
+        self.ledger.reverse(group,'2026-01-03','Wrong entry','place-reverse')
+        self.assertEqual([r['place_name'] for r in self.ledger.entries()],['Salem','Salem'])
+        report=build_report(self.ledger,CATEGORY_REPORTS['stl'],'2026-01-01','2026-01-31')
+        self.assertEqual([r[-1] for r in report.rows[1:-1]],['Salem','Salem'])
+        backup=Path(self.temp.name)/'with-place.sqlite3'
+        self.db.backup(backup); self.db.restore(backup)
+        self.assertEqual([r['place_name'] for r in self.ledger.entries()],['Salem','Salem'])
+
     def test_failed_posting_rolls_back_party_account_and_audits(self):
         request=self.request | {'type_key':'loan_repaid'}
         with self.assertRaisesRegex(ValueError,'negative'):
@@ -134,7 +151,7 @@ class CashbookCase(unittest.TestCase):
         path=Path(self.temp.name)/'combined.xlsx'
         export_report(report,path)
         workbook=load_workbook(path); sheet=workbook.active
-        self.assertEqual([sheet.cell(4,i).value for i in range(1,12)],report.columns)
+        self.assertEqual([sheet.cell(4,i).value for i in range(1,13)],report.columns)
         self.assertEqual(sheet['G6'].value,10000)
         self.assertEqual(sheet['H7'].value,-10000)
         self.assertIsInstance(sheet['C6'].value,datetime)
@@ -207,18 +224,18 @@ class VersionOneMigrationCase(unittest.TestCase):
             db=Database(folder,daily=False)
             try:
                 ledger=Ledger(db)
-                self.assertEqual(db.conn.execute('PRAGMA user_version').fetchone()[0],2)
+                self.assertEqual(db.conn.execute('PRAGMA user_version').fetchone()[0],MIGRATIONS[-1][0])
                 self.assertEqual(ledger.cash_balance(1,'2026-01-31'),150000)
                 self.assertEqual(ledger.principal(1,'2026-01-31'),50000)
                 self.assertEqual(ledger.entries()[0]['particulars'],'')
                 backups=list((Path(folder)/'backups').glob('pre-migration-*.sqlite3'))
-                self.assertEqual(len(backups),1)
+                self.assertEqual(len(backups),len(MIGRATIONS)-1)
                 db.validate_backup(backups[0])
                 ledger.post_cashbook(type_key='fd_interest',amount_paise=100,tx_date='2026-01-03',cash_id=1,finance_id=1,idempotency_key='new',particulars='Interest')
                 self.assertEqual(len(ledger.entries()),2)
                 db.restore(backups[0])
                 self.assertEqual(len(ledger.entries()),1)
                 self.assertEqual(ledger.principal(1,'2026-01-31'),50000)
-                self.assertEqual(db.conn.execute('PRAGMA user_version').fetchone()[0],2)
+                self.assertEqual(db.conn.execute('PRAGMA user_version').fetchone()[0],MIGRATIONS[-1][0])
             finally:
                 db.close()

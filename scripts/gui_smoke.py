@@ -64,7 +64,14 @@ def run():
                     if found: return found
                 return None
             assert not form.fields['notes'].winfo_ismapped()
-            toggle=find_button(form,'Additional details'); assert toggle is not None
+            visible=[key for key,field in form.fields.items() if field.winfo_ismapped()]
+            assert visible==['party','place_name','amount','direction','type'],visible
+            form.fields['direction'].set('IN'); form.fields['direction'].event_generate('<<ComboboxSelected>>'); app.update()
+            assert 'STL LOAN DEBIT' not in form.fields['type'].cget('values')
+            assert 'STL LOAN CREDIT' in form.fields['type'].cget('values')
+            form.fields['direction'].set('OUT'); form.fields['direction'].event_generate('<<ComboboxSelected>>'); app.update()
+            assert 'STL LOAN CREDIT' not in form.fields['type'].cget('values')
+            toggle=find_button(form,'More details'); assert toggle is not None
             toggle.invoke(); app.update(); assert form.fields['notes'].winfo_ismapped()
             new_name=find_button(form,'+ New name'); assert new_name is not None
             new_name.invoke(); app.update(); assert form.fields['party_name'].winfo_ismapped()
@@ -117,6 +124,20 @@ def run():
             app.clear_transactions(); app.update(); assert len(app.tx_rows)>1
             for action in [lambda:app.party_detail(1),lambda:app.finance_detail(1),lambda:app.cash_detail(1),lambda:app.transaction_detail(latest[0]['group_id']),app.audit_window]:
                 action(); app.update(); close_popups()
+            # A typed new name and per-entry location work from the five primary fields.
+            form=app.transaction_form('loan_disbursed'); app.update()
+            put(form,'party','GUI Quick Name'); put(form,'place_name','Chennai'); put(form,'amount','50')
+            form.submit(); app.update()
+            assert not forms(),'Quick named entry must save without separate master forms'
+            quick=next(r for r in app.ledger.entries() if r['party_name']=='GUI Quick Name')
+            assert quick['place_name']=='Chennai' and quick['direction']==-1
+            form=app.transaction_form('loan_disbursed'); app.update()
+            put(form,'amount','100'); form.fields['direction'].set('IN')
+            before=len(app.ledger.entries()); form.submit(); app.update()
+            assert forms() and len(app.ledger.entries())==before
+            assert 'matching IN/OUT' in form.error.cget('text')
+            assert form.fields['amount'].get()=='100'
+            close_popups()
             assert not errors,errors
         print('GUI SMOKE PASSED: six pages, 8 combined report-only menus, unified form, atomic new party/account, split receipt, office particulars, search, audit.')
         app.close()

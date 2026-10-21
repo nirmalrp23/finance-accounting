@@ -87,13 +87,13 @@ def build_cashbook_report(ledger, name, start, end, **filters):
         closing, balances, introductions = opening, {}, []
         balance_label = 'Category balance'
         notes.append('Opening/closing are cumulative net movements for the selected category/filters, not actual cash or principal outstanding. Use the complete Cash Book for actual cash and account statements for principal.')
-    rows = [['', 'Opening balance', start, '', '', 0, 0, opening, 0, '', '']]
+    rows = [['', 'Opening balance', start, '', '', 0, 0, opening, 0, '', '', '']]
     balance, number = opening, 0
     events = [(r['tx_date'], r['created_at'], r['id'], r) for r in selected] + introductions
     for day, _, _, item in sorted(events, key=lambda e: e[:3]):
         if 'group_id' not in item:
             balance += item['opening_paise']
-            rows.append(['', 'Opening introduced (non-cash)', day, '', item['name'], 0, 0, balance, 0, item['name'], ''])
+            rows.append(['', 'Opening introduced (non-cash)', day, '', item['name'], 0, 0, balance, 0, item['name'], '', ''])
             continue
         number += 1
         amount = item['amount_paise'] * item['factor']
@@ -101,14 +101,14 @@ def build_cashbook_report(ledger, name, start, end, **filters):
         rows.append([number, ('Reversal: ' if item['factor'] == -1 else '') + transaction_detail(item['type']), day,
                      item['party_name'] or '', item['particulars'], amount if item['direction'] == 1 else 0,
                      amount if item['direction'] == -1 else 0, balance,
-                     amount * item['direction'] if item['interest'] else 0, item['cash_name'], item['reference']])
+                     amount * item['direction'] if item['interest'] else 0, item['cash_name'], item['reference'], item['place_name']])
     if not complete:
         closing = balance
-    rows.append(['', 'Closing / totals', end, '', '', sum(r[5] for r in rows), sum(r[6] for r in rows), closing, sum(r[8] for r in rows), '', ''])
+    rows.append(['', 'Closing / totals', end, '', '', sum(r[5] for r in rows), sum(r[6] for r in rows), closing, sum(r[8] for r in rows), '', '', ''])
     return Report(name, f'{start} to {end} · INR · Asia/Kolkata',
                   ['S.No', 'Transaction Details / Category', 'Date', 'Name', 'Particulars / Description',
                    'Cash In / Credit', 'Cash Out / Debit', balance_label, 'Interest (+In / -Out)',
-                   'Cash / Bank', 'Reference'], rows, {5, 6, 7, 8},
+                   'Cash / Bank', 'Reference', 'Place Name'], rows, {5, 6, 7, 8},
                   notes + ['Interest is already included in Cash In / Cash Out; do not add it again. Positive interest is income; negative interest is expense. Reversals use signed amounts in the original columns.'])
 
 

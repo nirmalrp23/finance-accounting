@@ -191,6 +191,8 @@ class Form(tk.Toplevel):
         self.error.configure(text=''); self.error.pack_forget()
         try: self.on_save(self)
         except (ValueError,sqlite3.Error,OSError,ImportError) as exc:
+            if hasattr(self,'error_group'):
+                self.error_group['expanded']=True; self._layout_group(self.error_group)
             self.error.configure(text=str(exc)); self.error.pack(fill='x',pady=(0,12)); self.bell(); return
         self.destroy()
 
@@ -520,34 +522,52 @@ class Application(tk.Tk):
             v=form.values()
             type_key=next(k for k,label in options.items() if label==v['type'])
             spec=TYPES[type_key]
+            if v['direction'] != ('IN' if spec.direction==1 else 'OUT'):
+                raise ValueError('Choose Transaction details matching IN/OUT.')
             transfer=type_key=='transfer_out'
             creating_account=bool(spec.module and v['finance_mode']=='Create new account')
             creating_party=not transfer and v['party_mode']=='Create new party'
-            finance_id=form.fields['finance'].selected(True) if spec.module and not creating_account else None
+            finance_id=None
             party_id=None
             if not transfer and not creating_party and v['party_mode']=='Existing party':
-                party_id=form.fields['party'].selected(required=creating_account)
+                name=v['party'].strip()
+                selected_id=next((key for key,label in party.choices if label==name),None)
+                matched=next((p for p in self.ledger.parties() if p['id']==selected_id or p['name'].casefold()==name.casefold()),None)
+                party_id=matched['id'] if matched else None
+                if name and not matched:
+                    creating_party=True
+                if creating_account and not name:
+                    raise ValueError('Enter Name before opening a finance account.')
             party_values=None
             if creating_party:
                 party_values={k:v['party_'+k] for k in ('name','phone','address','email')}
+                if v['party_mode']=='Existing party': party_values['name']=v['party']
                 party_values['roles']=MODULES.get(spec.module,'General party')
+                if spec.module:
+                    creating_account=True; finance_id=None
+            if spec.module and not creating_account:
+                finance_id=form.fields['finance'].selected(True)
             terms=None
             if creating_account:
                 terms=dict(reference=v['account_reference'],start_date=v['account_date'],opening_paise=paise(v['opening']),annual_rate=v['rate'],frequency=v['frequency'],due_date=v['due_date'] or None)
             self.ledger.post_cashbook(type_key=type_key,amount_paise=paise(v['amount']),tx_date=v['date'],
                 cash_id=form.fields['cash'].selected(True),idempotency_key=key,party_id=party_id,
-                finance_id=finance_id,new_party=party_values,new_finance=terms,particulars=v['particulars'],
+                finance_id=finance_id,new_party=party_values,new_finance=terms,particulars=v['particulars'],place_name=v['place_name'],
                 interest_paise=paise(v['interest']) if type_key=='loan_repaid' else 0,
                 method=v['method'],external_ref=v['external'],notes=v['notes'],
                 transfer_to=form.fields['target'].selected(True) if transfer else None)
             self.show(self.page)
-        form=Form(self,'Cash Book Entry',save,button='Save entry',help_text='Choose the transaction details, enter the name and amount, then select the cash or bank account.')
-        type_widget=form.add('type','Category / Transaction Details *',options[initial],choices=list(options.values()))
+        form=Form(self,'Cash Book Entry',save,button='Save entry',help_text='Enter a name, place and amount. Choose IN or OUT, then the transaction details. Date and payment settings are under More details.')
+        party=form.add('party','Name',None,choices=self.party_choices(),search=True)
+        form.add('place_name','Place Name')
+        form.add('amount','Amount (₹) *')
+        direction_widget=form.add('direction','IN/OUT *','IN' if TYPES[initial].direction==1 else 'OUT',choices=['IN','OUT'])
+        type_widget=form.add('type','Transaction details *',options[initial],choices=[label for key,label in options.items() if TYPES[key].direction==TYPES[initial].direction])
+        party_section=form.section('More details',collapsible=True,expanded=new_party or new_finance)
+        form.error_group=party_section
         form.add('date','Date *',today())
-        direction=form.note('')
-        party_section=form.section('Party & account')
+        direction=ttk.Label(party_section['fields'],text='',style='CardMuted.TLabel',wraplength=790)
         party_mode=form.add('party_mode','Name / party','Create new party' if new_party else 'Existing party',choices=['Existing party','Create new party','No party (particulars only)'])
-        party=form.add('party','Existing name',None,choices=self.party_choices(),search=True)
         form.add('party_name','New name *')
         form.add('party_phone','Phone (optional)')
         form.add('party_address','Address (optional)')
@@ -560,26 +580,30 @@ class Application(tk.Tk):
         form.add('rate','Annual interest rate %','0')
         form.add('frequency','Interest payout frequency','Monthly',choices=['Monthly','Quarterly','Half-yearly','Yearly','At maturity','On demand','Interest-free'])
         form.add('due_date','Due / maturity date (optional)')
-        form.section('Payment details',columns=3)
-        form.add('amount','Amount / principal (₹) *')
         form.add('interest','Additional STL interest (₹)','0.00')
         form.add('cash','Cash / Bank account *',next((a['id'] for a in self.ledger.cash_accounts() if a['kind']=='cash'),self.ledger.cash_accounts()[0]['id']),choices=self.cash_choices(),search=True)
         form.add('method','Payment method *','cash',choices=list(METHODS))
         form.add('target','Transfer destination *',None,choices=self.cash_choices(),search=True)
         form.add('particulars','Particulars / Description')
-        account_note=ttk.Label(party_section['panel'],text='',style='CardMuted.TLabel',wraplength=790)
-        account_note.pack(side='bottom',anchor='w',pady=(5,0))
-        form.section('Additional details (optional)',collapsible=True,expanded=False)
+        account_note=ttk.Label(party_section['fields'],text='',style='CardMuted.TLabel',wraplength=790)
+        account_note.grid(row=100,column=0,columnspan=2,sticky='w',pady=(5,0))
         form.add('external','External reference')
         form.add('notes','Notes')
         party_keys=['party_name','party_phone','party_address','party_email']
         account_keys=['account_reference','account_date','opening','rate','frequency','due_date']
+        def direction_changed(event=None):
+            choices=[label for key,label in options.items() if ('IN' if TYPES[key].direction==1 else 'OUT')==direction_widget.get()]
+            type_widget.configure(values=choices)
+            if type_widget.get() not in choices: type_widget.set(choices[0])
+            update()
         def selected_type():
             return next(k for k,label in options.items() if label==type_widget.get())
         def refresh_choices():
             spec=TYPES[selected_type()]
             previous=next((key for key,label in finance.choices if label==finance.get()),None)
-            party_id=next((key for key,label in party.choices if label==party.get()),None) if party_mode.get()=='Existing party' else None
+            party_id=next((key for key,label in party.choices if label==party.get()),None)
+            if party_id is None and party_mode.get()=='Existing party':
+                party_id=next((p['id'] for p in self.ledger.parties() if p['name'].casefold()==party.get().strip().casefold()),None)
             choices=[(a['id'],f'{a["reference"]} · {a["party_name"]}') for a in finance_accounts.values() if a['module']==spec.module and a['status']!='closed' and (not party_id or a['party_id']==party_id)]
             finance.choices=choices; finance.labels=[label for _,label in choices]; finance.configure(values=finance.labels)
             if previous in {key for key,_ in choices}: finance.select_key(previous)
@@ -600,7 +624,7 @@ class Application(tk.Tk):
             creating_party=party_mode.get()=='Create new party' and not transfer
             creating_account=bool(spec.module and finance_mode.get()=='Create new account')
             form.visible(['party_mode'],not transfer)
-            form.visible(['party'],not transfer and party_mode.get()=='Existing party')
+            form.visible(['party'],True)
             form.visible(party_keys,creating_party)
             form.visible(['finance_mode'],bool(spec.module))
             form.visible(['finance'],bool(spec.module) and not creating_account)
@@ -644,9 +668,11 @@ class Application(tk.Tk):
             update()
         party_new=ttk.Button(party_section['heading'],text='+ New name',style='Subtle.TButton',command=toggle_party)
         account_new=ttk.Button(party_section['heading'],text='+ New account',style='Subtle.TButton',command=toggle_account)
+        direction_widget.bind('<<ComboboxSelected>>',direction_changed)
         type_widget.bind('<<ComboboxSelected>>',update)
         party_mode.bind('<<ComboboxSelected>>',update)
         party.bind('<<ComboboxSelected>>',update)
+        party.bind('<FocusOut>',lambda event: refresh_choices())
         finance_mode.bind('<<ComboboxSelected>>',update)
         finance.bind('<<ComboboxSelected>>',account_changed)
         form.fields['date'].bind('<FocusOut>',update)
@@ -720,7 +746,7 @@ class Application(tk.Tk):
         minimum=paise(self.tx_min.get()) if self.tx_min.get().strip() else None
         maximum=paise(self.tx_max.get()) if self.tx_max.get().strip() else None
         if minimum is not None and maximum is not None and minimum>maximum: raise ValueError('Minimum amount exceeds maximum.')
-        self.tx_rows=[r for r in rows if (not term or term in ' '.join(str(r.get(k) or '') for k in ('reference','external_ref','party_name','finance_reference','notes','particulars','category_name')).casefold() or term in transaction_detail(r['type']).casefold() or term in TYPES[r['type']].label.casefold()) and (minimum is None or r['amount_paise']>=minimum) and (maximum is None or r['amount_paise']<=maximum)]
+        self.tx_rows=[r for r in rows if (not term or term in ' '.join(str(r.get(k) or '') for k in ('reference','external_ref','party_name','place_name','finance_reference','notes','particulars','category_name')).casefold() or term in transaction_detail(r['type']).casefold() or term in TYPES[r['type']].label.casefold()) and (minimum is None or r['amount_paise']>=minimum) and (maximum is None or r['amount_paise']<=maximum)]
         sorting=self.tx_sort.get()
         if sorting in ('Newest first','Oldest first'): self.tx_rows.sort(key=lambda r:(r['tx_date'],r['created_at'],r['id']),reverse=sorting=='Newest first')
         elif sorting.startswith('Amount'): self.tx_rows.sort(key=lambda r:r['amount_paise'],reverse=sorting=='Amount high to low')
@@ -735,12 +761,12 @@ class Application(tk.Tk):
     def render_transactions(self):
         for child in self.tx_body.winfo_children(): child.destroy()
         rows=self.tx_rows[self.tx_page*50:self.tx_page*50+50]
-        table(self.tx_body,['S.No','Transaction Details / Category','Date','Name','Particulars','Cash In','Cash Out','Cash Balance'],[[self.tx_page*50+i+1,('Reversal: ' if r['factor']==-1 else '')+transaction_detail(r['type']),r['tx_date'],r['party_name'] or '',r['particulars'],r['amount_paise']*r['factor'] if r['direction']==1 else 0,r['amount_paise']*r['factor'] if r['direction']==-1 else 0,self.tx_balances.get(r['id'],'')] for i,r in enumerate(rows)],{5,6,7},identifiers=[r['id'] for r in rows],widths=[50,190,100,120,140,100,100,120],on_open=lambda iid:self.transaction_detail(next(r['group_id'] for r in rows if r['id']==int(iid))))
+        table(self.tx_body,['S.No','Transaction Details / Category','Date','Name','Particulars','Cash In','Cash Out','Cash Balance','Place Name'],[[self.tx_page*50+i+1,('Reversal: ' if r['factor']==-1 else '')+transaction_detail(r['type']),r['tx_date'],r['party_name'] or '',r['particulars'],r['amount_paise']*r['factor'] if r['direction']==1 else 0,r['amount_paise']*r['factor'] if r['direction']==-1 else 0,self.tx_balances.get(r['id'],''),r['place_name']] for i,r in enumerate(rows)],{5,6,7},identifiers=[r['id'] for r in rows],widths=[50,190,100,120,140,100,100,120,130],on_open=lambda iid:self.transaction_detail(next(r['group_id'] for r in rows if r['id']==int(iid))))
         self.tx_info.configure(text=f'{len(self.tx_rows)} entries · page {self.tx_page+1} / {max(1,(len(self.tx_rows)+49)//50)}')
 
     def export_transactions(self):
         self.filter_transactions()
-        report=Report('Filtered Cash Book',f'{self.start} to {self.end}', ['S.No','Transaction Details / Category','Date','Name','Particulars','Cash In','Cash Out','Cash Balance','Cash / Bank','Finance account','Reference','Method','External reference','Notes','Created by','Created at UTC','Reversal of'],[[i+1,transaction_detail(r['type']),r['tx_date'],r['party_name'] or '',r['particulars'],r['amount_paise']*r['factor'] if r['direction']==1 else 0,r['amount_paise']*r['factor'] if r['direction']==-1 else 0,self.tx_balances.get(r['id'],''),r['cash_name'],r['finance_reference'] or '',r['reference'],r['method'],r['external_ref'],r['notes'],r['created_by'],r['created_at'],r['reversal_of'] or ''] for i,r in enumerate(self.tx_rows)],{5,6,7},['Cash balance is actual chronological cash across the selected payment accounts, including entries hidden by category/search filters. It is not recomputed by sort order.'])
+        report=Report('Filtered Cash Book',f'{self.start} to {self.end}', ['S.No','Transaction Details / Category','Date','Name','Particulars','Cash In','Cash Out','Cash Balance','Cash / Bank','Finance account','Reference','Method','External reference','Notes','Created by','Created at UTC','Reversal of','Place Name'],[[i+1,transaction_detail(r['type']),r['tx_date'],r['party_name'] or '',r['particulars'],r['amount_paise']*r['factor'] if r['direction']==1 else 0,r['amount_paise']*r['factor'] if r['direction']==-1 else 0,self.tx_balances.get(r['id'],''),r['cash_name'],r['finance_reference'] or '',r['reference'],r['method'],r['external_ref'],r['notes'],r['created_by'],r['created_at'],r['reversal_of'] or '',r['place_name']] for i,r in enumerate(self.tx_rows)],{5,6,7},['Cash balance is actual chronological cash across the selected payment accounts, including entries hidden by category/search filters. It is not recomputed by sort order.'])
         self.save_report(report,'.csv')
 
     def transaction_detail(self,group_id):
@@ -749,7 +775,7 @@ class Application(tk.Tk):
         window=tk.Toplevel(self); window.title(group['reference']); window.geometry('1000x540')
         body=ttk.Frame(window,padding=20); body.pack(fill='both',expand=True)
         ttk.Label(body,text=group['reference'],style='Title.TLabel').pack(anchor='w')
-        ttk.Label(body,text=f'Date: {group["tx_date"]}   Method: {group["method"]}\nCreated by {group["created_by"]} at {group["created_at"]} (UTC)\nExternal reference: {group["external_ref"]}\nParticulars: {group["particulars"]}\nNotes: {group["notes"]}\nReversal of: {group["reversal_of"] or "—"}',wraplength=900).pack(anchor='w',pady=12)
+        ttk.Label(body,text=f'Date: {group["tx_date"]}   Method: {group["method"]}\nCreated by {group["created_by"]} at {group["created_at"]} (UTC)\nExternal reference: {group["external_ref"]}\nPlace Name: {group["place_name"]}\nParticulars: {group["particulars"]}\nNotes: {group["notes"]}\nReversal of: {group["reversal_of"] or "—"}',wraplength=900).pack(anchor='w',pady=12)
         table(body,['Type','Finance account','Cash / Bank','Amount','Factor'],[[TYPES[r['type']].label,r['finance_reference'] or '',r['cash_name'],r['amount_paise'],r['factor']] for r in rows],{3},height=4)
         reversed_group=self.db.one('SELECT reference FROM posting_groups WHERE reversal_of=?',(group_id,))
         if reversed_group: ttk.Label(body,text='Reversed by '+reversed_group['reference'],foreground='#a23a30').pack(anchor='w',pady=10)

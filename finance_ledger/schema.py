@@ -62,4 +62,6 @@ CREATE TRIGGER audit_no_delete BEFORE DELETE ON audit_log BEGIN SELECT RAISE(ABO
 '''), (2, '''
 ALTER TABLE posting_groups ADD COLUMN particulars TEXT NOT NULL DEFAULT '';
 ALTER TABLE posting_groups ADD COLUMN intake_fingerprint TEXT NOT NULL DEFAULT '';
+'''), (3, '''
+ALTER TABLE posting_groups ADD COLUMN place_name TEXT NOT NULL DEFAULT '';
 ''')]
