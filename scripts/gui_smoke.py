@@ -40,11 +40,13 @@ def run():
                 app.report_nav.event_generate('<<TreeviewSelect>>'); app.update()
                 assert app.page=='Reports'
                 assert app.report_name.get()==name
+                assert app.report_type.selected() is None
+                assert str(app.report_type.cget('state'))=='disabled'
                 assert not forms(),'A report menu must not create an entry form'
                 assert not errors,errors
             print('REPORT MENUS OK:',len(CATEGORY_REPORTS))
-            app.report_search.set('FD'); app.update()
-            assert app.report_nav.exists('fd_received') and not app.report_nav.exists('loan_disbursed')
+            app.report_search.set('Fixed'); app.update()
+            assert app.report_nav.exists('fd') and not app.report_nav.exists('stl')
             app.report_search.set(''); app.update()
             assert all(app.report_nav.exists(key) for key in CATEGORY_REPORTS)
             app.show('Dashboard')
@@ -116,7 +118,7 @@ def run():
             for action in [lambda:app.party_detail(1),lambda:app.finance_detail(1),lambda:app.cash_detail(1),lambda:app.transaction_detail(latest[0]['group_id']),app.audit_window]:
                 action(); app.update(); close_popups()
             assert not errors,errors
-        print('GUI SMOKE PASSED: six pages, 18 report-only menus, unified form, atomic new party/account, split receipt, office particulars, search, audit.')
+        print('GUI SMOKE PASSED: six pages, 8 combined report-only menus, unified form, atomic new party/account, split receipt, office particulars, search, audit.')
         app.close()
 
 

@@ -20,7 +20,22 @@ TRANSACTION_DETAILS = {
     'general_income': 'OTHER INCOME',
     'transfer_out': 'CASH / BANK TRANSFER',
 }
-CATEGORY_REPORTS = {key: label + ' report' for key, label in TRANSACTION_DETAILS.items()}
+# Report families combine principal debit/credit and actual interest.
+CATEGORY_TYPES = {
+    'stl': ('loan_disbursed', 'loan_repaid', 'loan_interest'),
+    'fd': ('fd_received', 'fd_repaid', 'fd_interest'),
+    'external': ('other_received', 'other_repaid', 'other_interest'),
+    'hand_given': ('hand_given_disbursed', 'hand_given_repaid', 'hand_given_interest'),
+    'hand_taken': ('hand_taken_received', 'hand_taken_repaid', 'hand_taken_interest'),
+    'general_expense': ('general_expense',),
+    'general_income': ('general_income',),
+    'transfers': ('transfer_out', 'transfer_in'),
+}
+CATEGORY_REPORTS = dict(zip(CATEGORY_TYPES, (
+    'STL Loans report', 'Fixed Deposits report', 'External Loans report',
+    'Hand Loans Given report', 'Finance Hand Loans report',
+    'Office Expenses report', 'Other Income report', 'Cash / Bank Transfers report',
+)))
 
 
 def transaction_detail(type_key):

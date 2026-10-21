@@ -107,19 +107,66 @@ class CashbookCase(unittest.TestCase):
                 self.assertTrue(row['finance_reference'])
         self.assertEqual(len(self.ledger.finance_accounts()),5)
 
-    def test_category_reports_keep_principal_and_interest_separate(self):
+    def test_combined_reports_include_debit_credit_interest_without_double_counting(self):
         self.ledger.post_cashbook(**self.request)
         account=self.ledger.entries()[0]['finance_id']
         self.ledger.post_cashbook(type_key='loan_repaid',amount_paise=100_000,interest_paise=1000,tx_date='2026-01-03',cash_id=self.cash,idempotency_key='receipt',finance_id=account,particulars='Receipt')
-        principal=build_report(self.ledger,CATEGORY_REPORTS['loan_repaid'],'2026-01-01','2026-01-31')
-        interest=build_report(self.ledger,CATEGORY_REPORTS['loan_interest'],'2026-01-01','2026-01-31')
-        self.assertEqual(principal.rows[-1][5],100_000)
-        self.assertEqual(interest.rows[-1][5],1000)
-        self.assertEqual(len(principal.rows),3)
+        self.ledger.post_cashbook(type_key='general_expense',amount_paise=500,tx_date='2026-01-03',cash_id=self.cash,idempotency_key='office',particulars='Water')
+        report=build_report(self.ledger,CATEGORY_REPORTS['stl'],'2026-01-01','2026-01-31',type='loan_repaid',module='fd')
+        self.assertEqual(len(report.rows),5)
+        self.assertEqual(report.rows[-1][5:9],[101_000,1_000_000,-899_000,1000])
+        self.assertEqual(report.rows[2][8],0)  # principal repayment
+        self.assertEqual(report.rows[3][8],1000)  # interest, already in cash in
+        feb=build_report(self.ledger,CATEGORY_REPORTS['stl'],'2026-02-01','2026-02-28')
+        self.assertEqual(feb.rows[0][7],-899_000)
+        self.assertEqual(feb.rows[-1][7],-899_000)
         for key,name in CATEGORY_REPORTS.items():
-            report=build_report(self.ledger,name,'2026-01-01','2026-01-31')
-            self.assertTrue(all(len(r)==len(report.columns) for r in report.rows))
+            result=build_report(self.ledger,name,'2026-01-01','2026-01-31')
+            self.assertTrue(all(len(r)==len(result.columns) for r in result.rows))
+        self.assertEqual(len(CATEGORY_REPORTS),8)
         self.assertEqual(set(TRANSACTION_DETAILS),set(TYPES)-{'transfer_in'})
+
+    def test_excel_cashbook_has_typed_dates_money_and_reference_layout(self):
+        from datetime import datetime
+        from openpyxl import load_workbook
+        self.ledger.post_cashbook(**self.request)
+        report=build_report(self.ledger,CATEGORY_REPORTS['stl'],'2026-01-01','2026-01-31')
+        path=Path(self.temp.name)/'combined.xlsx'
+        export_report(report,path)
+        workbook=load_workbook(path); sheet=workbook.active
+        self.assertEqual([sheet.cell(4,i).value for i in range(1,12)],report.columns)
+        self.assertEqual(sheet['G6'].value,10000)
+        self.assertEqual(sheet['H7'].value,-10000)
+        self.assertIsInstance(sheet['C6'].value,datetime)
+        self.assertEqual(sheet['C6'].number_format,'dd.mm.yyyy')
+        self.assertEqual(sheet.freeze_panes,'F6')
+        self.assertEqual(sheet['F6'].border.bottom.style,'thin')
+        workbook.close()
+
+    def test_each_finance_report_keeps_interest_direction_and_reversals(self):
+        families=[('stl','loan_disbursed','loan_repaid','loan_interest',1),
+                  ('fd','fd_received','fd_repaid','fd_interest',-1),
+                  ('external','other_received','other_repaid','other_interest',-1),
+                  ('hand_given','hand_given_disbursed','hand_given_repaid','hand_given_interest',1),
+                  ('hand_taken','hand_taken_received','hand_taken_repaid','hand_taken_interest',-1)]
+        for key,initial,repayment,interest,direction in families:
+            with self.subTest(family=key):
+                self.ledger.post_cashbook(**(self.request | {'type_key':initial,'idempotency_key':key,'new_party':{'name':key},'new_finance':{'reference':key}}))
+                account=next(a['id'] for a in self.ledger.finance_accounts() if a['reference']==key)
+                group=self.ledger.post_cashbook(type_key=repayment,amount_paise=100_000,tx_date='2026-01-03',cash_id=self.cash,idempotency_key=key+'-repay',finance_id=account)
+                interest_group=self.ledger.post_cashbook(type_key=interest,amount_paise=1000,tx_date='2026-01-03',cash_id=self.cash,idempotency_key=key+'-interest',finance_id=account)
+                self.ledger.reverse(group,'2026-02-01','Correction',key+'-reverse')
+                self.ledger.reverse(interest_group,'2026-02-01','Correction',key+'-reverse-interest')
+                jan=build_report(self.ledger,CATEGORY_REPORTS[key],'2026-01-01','2026-01-31')
+                feb=build_report(self.ledger,CATEGORY_REPORTS[key],'2026-02-01','2026-02-28')
+                self.assertEqual(len(jan.rows),5)
+                self.assertEqual({r[1] for r in jan.rows[1:-1]}, {TRANSACTION_DETAILS[t] for t in (initial,repayment,interest)})
+                self.assertEqual(jan.rows[-1][8],1000*direction)
+                self.assertEqual(feb.rows[-1][8],-1000*direction)
+                self.assertEqual(feb.rows[0][7],jan.rows[-1][7])
+                self.assertEqual(feb.rows[-1][7],-1_000_000*direction)
+                scoped=build_report(self.ledger,CATEGORY_REPORTS[key],'2026-01-01','2026-01-31',finance_id=account)
+                self.assertEqual(scoped.rows,jan.rows)
 
     def test_running_cash_stays_chronological_and_includes_opening(self):
         self.ledger.post_cashbook(**self.request)
@@ -136,8 +183,8 @@ class CashbookCase(unittest.TestCase):
     def test_category_report_reversals_do_not_rewrite_previous_period(self):
         group=self.ledger.post_cashbook(**self.request)
         self.ledger.reverse(group,'2026-02-01','Correction','reverse')
-        january=build_report(self.ledger,CATEGORY_REPORTS['loan_disbursed'],'2026-01-01','2026-01-31')
-        february=build_report(self.ledger,CATEGORY_REPORTS['loan_disbursed'],'2026-02-01','2026-02-28')
+        january=build_report(self.ledger,CATEGORY_REPORTS['stl'],'2026-01-01','2026-01-31')
+        february=build_report(self.ledger,CATEGORY_REPORTS['stl'],'2026-02-01','2026-02-28')
         self.assertEqual(january.rows[-1][6],1_000_000)
         self.assertEqual(february.rows[-1][6],-1_000_000)
         self.assertEqual(february.rows[1][4],'Business loan')

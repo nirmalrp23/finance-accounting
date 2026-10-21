@@ -301,19 +301,10 @@ class Application(tk.Tk):
     def _filter_report_nav(self):
         for iid in self.report_nav.get_children(): self.report_nav.delete(iid)
         term=self.report_search.get().casefold().strip(); count=0
-        groups=[('STL loans',['loan_disbursed','loan_repaid','loan_interest']),
-                ('Fixed deposits',['fd_received','fd_repaid','fd_interest']),
-                ('External loans',['other_received','other_repaid','other_interest']),
-                ('Hand loans given',['hand_given_disbursed','hand_given_repaid','hand_given_interest']),
-                ('Finance hand loans',['hand_taken_received','hand_taken_repaid','hand_taken_interest']),
-                ('General & transfers',['general_expense','general_income','transfer_out'])]
-        for index,(title,keys) in enumerate(groups):
-            matches=[key for key in keys if not term or term in TRANSACTION_DETAILS[key].casefold() or term in title.casefold()]
-            if not matches: continue
-            parent=self.report_nav.insert('', 'end',iid='group:'+str(index),text=title,open=bool(term),tags=('group',))
-            for key in matches:
-                label=TRANSACTION_DETAILS[key].title().replace('Stl','STL').replace('Fd','FD')
-                self.report_nav.insert(parent,'end',iid=key,text=label); count+=1
+        for key, title in CATEGORY_REPORTS.items():
+            label=title.removesuffix(' report')
+            if term and term not in label.casefold(): continue
+            self.report_nav.insert('', 'end',iid=key,text=label); count+=1
         self.report_count.configure(text=f'{count} categories · type to find a report')
 
     def _style(self):
@@ -803,9 +794,11 @@ class Application(tk.Tk):
         self.active_report=self.report_name.get()
         category=next((key for key,label in CATEGORY_REPORTS.items() if label==self.active_report),None)
         if category:
-            self.report_type.select_key(category); self.report_type.configure(state='disabled')
-        elif self.report_type.cget('state')=='disabled':
+            self.report_type.select_key(None); self.report_type.configure(state='disabled')
+            self.report_module.select_key(None); self.report_module.configure(state='disabled')
+        elif str(self.report_type.cget('state'))=='disabled':
             self.report_type.configure(state='normal'); self.report_type.select_key(None)
+            self.report_module.configure(state='normal')
         report=build_report(self.ledger,self.report_name.get(),self.start,self.end,party_id=self.report_party.selected(),finance_id=self.report_finance.selected(),cash_id=self.report_cash.selected(),module=self.report_module.selected(),status=self.report_status.selected(),type=self.report_type.selected())
         for child in self.report_body.winfo_children(): child.destroy()
         self.report_widget(self.report_body,report)
@@ -813,7 +806,7 @@ class Application(tk.Tk):
     def report_widget(self,parent,report):
         header=ttk.Frame(parent); header.pack(fill='x')
         ttk.Label(header,text=report.title,style='Section.TLabel',wraplength=440).pack(side='left')
-        for label,suffix in [('CSV','.csv'),('Excel','.xlsx'),('PDF / Print','.pdf')]:
+        for label,suffix in [('CSV','.csv'),('Download Excel','.xlsx'),('PDF / Print','.pdf')]:
             ttk.Button(header,text=label,command=lambda suffix=suffix:self.guard(lambda:self.save_report(report,suffix))).pack(side='right',padx=4)
         ttk.Label(parent,text=report.period,style='Muted.TLabel').pack(anchor='w',pady=6)
         def open_account(index):

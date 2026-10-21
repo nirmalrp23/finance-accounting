@@ -7,7 +7,7 @@ from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
 from .ledger import MODULES, TYPES
-from .categories import CATEGORY_REPORTS, transaction_detail
+from .categories import CATEGORY_REPORTS, CATEGORY_TYPES, transaction_detail
 from .money import money, valid_date
 
 CASHBOOK_REPORT = 'Cash book (all accounts)'
@@ -60,11 +60,16 @@ def build_cashbook_report(ledger, name, start, end, **filters):
     category = next((key for key, label in CATEGORY_REPORTS.items() if label == name), None)
     filters = dict(filters)
     if category:
-        filters['type'] = category
-    selected = ledger.entries(start, end, **filters)
+        # A family report must always include debit, credit and interest.
+        filters.pop('type', None)
+        filters.pop('module', None)
+    def entries(first, last):
+        result = ledger.entries(first, last, **filters)
+        return [r for r in result if r['type'] in CATEGORY_TYPES[category]] if category else result
+    selected = entries(start, end)
     cash_id = filters.get('cash_id')
     complete = not category and not any(filters.get(k) for k in ('party_id', 'finance_id', 'type', 'category_id', 'module', 'status'))
-    if not cash_id and not (category and category.startswith('transfer')):
+    if not cash_id and not (category == 'transfers'):
         selected = [r for r in selected if not r['type'].startswith('transfer')]
     before = previous(start)
     notes = ['Category means Transaction Details. Cash In / Cash Out are derived from the category. Principal and actual interest remain separate.']
@@ -75,33 +80,36 @@ def build_cashbook_report(ledger, name, start, end, **filters):
         balance_label = 'Cash balance'
         notes.append('Actual cash/bank balance. Opening introductions are non-cash. Internal transfers are excluded across all accounts and included for an individual payment account.')
     else:
-        history = ledger.entries('0001-01-01', before, **filters) if before else []
-        if not (category and category.startswith('transfer')):
+        history = entries('0001-01-01', before) if before else []
+        if not (category == 'transfers'):
             history = [r for r in history if not r['type'].startswith('transfer')]
         opening = sum(r['amount_paise'] * r['factor'] * r['direction'] for r in history)
         closing, balances, introductions = opening, {}, []
-        balance_label = 'Net category movement'
+        balance_label = 'Category balance'
         notes.append('Opening/closing are cumulative net movements for the selected category/filters, not actual cash or principal outstanding. Use the complete Cash Book for actual cash and account statements for principal.')
-    rows = [['', 'Opening balance', start, '', '', 0, 0, opening, '', '']]
+    rows = [['', 'Opening balance', start, '', '', 0, 0, opening, 0, '', '']]
     balance, number = opening, 0
     events = [(r['tx_date'], r['created_at'], r['id'], r) for r in selected] + introductions
     for day, _, _, item in sorted(events, key=lambda e: e[:3]):
         if 'group_id' not in item:
             balance += item['opening_paise']
-            rows.append(['', 'Opening introduced (non-cash)', day, '', item['name'], 0, 0, balance, item['name'], ''])
+            rows.append(['', 'Opening introduced (non-cash)', day, '', item['name'], 0, 0, balance, 0, item['name'], ''])
             continue
         number += 1
         amount = item['amount_paise'] * item['factor']
         balance = balances[item['id']] if complete else balance + amount * item['direction']
         rows.append([number, ('Reversal: ' if item['factor'] == -1 else '') + transaction_detail(item['type']), day,
                      item['party_name'] or '', item['particulars'], amount if item['direction'] == 1 else 0,
-                     amount if item['direction'] == -1 else 0, balance, item['cash_name'], item['reference']])
+                     amount if item['direction'] == -1 else 0, balance,
+                     amount * item['direction'] if item['interest'] else 0, item['cash_name'], item['reference']])
     if not complete:
         closing = balance
-    rows.append(['', 'Closing / totals', end, '', '', sum(r[5] for r in rows), sum(r[6] for r in rows), closing, '', ''])
+    rows.append(['', 'Closing / totals', end, '', '', sum(r[5] for r in rows), sum(r[6] for r in rows), closing, sum(r[8] for r in rows), '', ''])
     return Report(name, f'{start} to {end} · INR · Asia/Kolkata',
                   ['S.No', 'Transaction Details / Category', 'Date', 'Name', 'Particulars / Description',
-                   'Cash In', 'Cash Out', balance_label, 'Cash / Bank', 'Reference'], rows, {5, 6, 7}, notes)
+                   'Cash In / Credit', 'Cash Out / Debit', balance_label, 'Interest (+In / -Out)',
+                   'Cash / Bank', 'Reference'], rows, {5, 6, 7, 8},
+                  notes + ['Interest is already included in Cash In / Cash Out; do not add it again. Positive interest is income; negative interest is expense. Reversals use signed amounts in the original columns.'])
 
 
 def build_report(ledger, name, start, end, **filters):
@@ -289,30 +297,67 @@ def _export_report(report, path, business_name='Finance Ledger'):
     elif suffix == '.xlsx':
         try:
             from openpyxl import Workbook
-            from openpyxl.styles import Font, PatternFill
+            from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
             from openpyxl.utils import get_column_letter
         except ImportError:
             raise ValueError('Excel export needs openpyxl. Install requirements.txt or use CSV.') from None
         workbook = Workbook(); sheet = workbook.active; sheet.title = 'Finance Ledger'
         sheet.append([safe_text(business_name)]); sheet.append([safe_text(report.title)]); sheet.append([report.period]); sheet.append(report.columns)
         for row in report.rows:
-            sheet.append([Decimal(value)/100 if i in report.money_columns and isinstance(value,int) else safe_text(value or '') for i,value in enumerate(row)])
-        for row in sheet.iter_rows(min_row=5):
+            values=[]
+            for i,value in enumerate(row):
+                if i in report.money_columns and isinstance(value,int): value=Decimal(value)/100
+                elif report.columns[i]=='Date' and value:
+                    value=date.fromisoformat(value)
+                else: value=safe_text(value if value is not None else '')
+                values.append(value)
+            sheet.append(values)
+        last_column=get_column_letter(len(report.columns)); last_row=sheet.max_row
+        sheet.sheet_view.showGridLines=False
+        for number in (1,2,3):
+            if len(report.columns)>1: sheet.merge_cells(f'A{number}:{last_column}{number}')
+            sheet.cell(number,1).font=Font(name='Calibri',size=16 if number==1 else 11,bold=number<3,color='164E45')
+            sheet.row_dimensions[number].height=26 if number==1 else 22
+        edge=Side(style='thin',color='CED8D2')
+        border=Border(left=edge,right=edge,top=edge,bottom=edge)
+        for row in sheet.iter_rows(min_row=4,max_row=last_row):
             for i,cell in enumerate(row):
+                cell.font=Font(name='Calibri',size=11)
+                cell.border=border
+                cell.alignment=Alignment(vertical='center',wrap_text=True,horizontal='right' if i in report.money_columns else 'left')
                 if i in report.money_columns:
-                    cell.number_format = '#,##0.00;[Red]-#,##0.00'
+                    cell.number_format='#,##0.00;[Red]-#,##0.00;"–"'
+                if report.columns[i]=='Date' and cell.row>4: cell.number_format='dd.mm.yyyy'
+            sheet.row_dimensions[row[0].row].height=32
         for cell in sheet[4]:
-            cell.font = Font(color='FFFFFF',bold=True); cell.fill = PatternFill('solid',fgColor='164E45')
-        sheet.freeze_panes = 'A5'; sheet.auto_filter.ref = f'A4:{get_column_letter(len(report.columns))}{sheet.max_row}'
+            cell.font=Font(name='Calibri',size=11,color='FFFFFF',bold=True)
+            cell.fill=PatternFill('solid',fgColor='164E45')
+        sheet.row_dimensions[4].height=38
+        is_cashbook='S.No' in report.columns
+        if is_cashbook:
+            for number in (5,last_row):
+                for cell in sheet[number]:
+                    cell.font=Font(name='Calibri',size=11,bold=True,color='164E45')
+                    cell.fill=PatternFill('solid',fgColor='E8F0EB')
+        sheet.freeze_panes='F6' if is_cashbook else 'A5'
+        sheet.auto_filter.ref=f'A4:{last_column}{max(4,last_row-1) if is_cashbook else last_row}'
         for i,column in enumerate(report.columns,1):
-            sheet.column_dimensions[get_column_letter(i)].width = min(42,max(18,len(column)+3))
+            width=12 if column=='S.No' else 15 if column=='Date' else 36 if column in ('Transaction Details / Category','Particulars / Description') else 25 if column=='Name' else min(32,max(20,len(column)+2))
+            sheet.column_dimensions[get_column_letter(i)].width=width
         sheet.append([])
         for note in report.notes:
             sheet.append([safe_text(note)])
+            number=sheet.max_row
+            if len(report.columns)>1: sheet.merge_cells(f'A{number}:{last_column}{number}')
+            sheet.cell(number,1).alignment=Alignment(wrap_text=True,vertical='top')
+            sheet.cell(number,1).font=Font(name='Calibri',size=10,color='53685D')
+            sheet.row_dimensions[number].height=30
         sheet.sheet_properties.pageSetUpPr.fitToPage = True
         sheet.page_setup.orientation = 'landscape'; sheet.page_setup.paperSize = sheet.PAPERSIZE_A4
         sheet.page_setup.fitToWidth = 1; sheet.page_setup.fitToHeight = 0
         sheet.print_title_rows = '1:4'
+        sheet.print_options.horizontalCentered=True
+        sheet.print_area=f'A1:{last_column}{sheet.max_row}'
         workbook.save(path)
     elif suffix == '.pdf':
         try:
