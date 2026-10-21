@@ -208,7 +208,7 @@ class LedgerCase(unittest.TestCase):
             if name=='Party statement': kwargs['party_id']=self.party
             if name=='Individual FD statement': kwargs['finance_id']=self.accounts['fd']
             if name=='Individual loan statement': kwargs['finance_id']=self.accounts['loan']
-            if name=='Other finance statement': kwargs['finance_id']=self.accounts['other']
+            if name=='External Loan statement': kwargs['finance_id']=self.accounts['other']
             with self.subTest(name=name):
                 report=build_report(self.l,name,'2026-01-01','2026-02-28',**kwargs)
                 self.assertTrue(report.columns)
@@ -405,6 +405,16 @@ class MoneyAndExportCase(unittest.TestCase):
                     export_report(Report('Test','2026',['Amount'],[[100]],{0}),path)
             self.assertEqual(path.read_bytes(),b'previous report')
             self.assertEqual(list(Path(directory).glob('.finance-ledger-*')),[])
+
+    def test_fresh_install_starts_empty_and_stays_empty_on_reopen(self):
+        with tempfile.TemporaryDirectory() as directory:
+            for _ in range(2):
+                db=Database(directory,daily=False)
+                try:
+                    for table in ('parties','cash_accounts','finance_accounts','posting_groups','entries','audit_log'):
+                        self.assertEqual(db.one(f'SELECT COUNT(*) n FROM {table}')['n'],0,table)
+                finally:
+                    db.close()
 
     def test_demo_is_explicit_and_repeatable(self):
         with tempfile.TemporaryDirectory() as directory:

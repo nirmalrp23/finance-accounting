@@ -20,6 +20,24 @@ TRANSACTION_DETAILS = {
     'general_income': 'OTHER INCOME',
     'transfer_out': 'CASH / BANK TRANSFER',
 }
+# Historical labels stay available to reports, filters and audit history.
+ENTRY_DETAILS = {key: label for key, label in TRANSACTION_DETAILS.items() if key not in ('hand_taken_interest', 'hand_given_interest')}
+
+REPORT_TYPE_CHOICES = (
+    (None, 'All transaction'),
+    ('loan_repaid', 'STL LOAN CREDIT'),
+    ('loan_disbursed', 'STL LOAN DEBIT'),
+    ('loan_interest', 'STL LOAN INTEREST CREDIT'),
+    ('fd_received', 'FD CREDIT'),
+    ('fd_repaid', 'FD DEBIT'),
+    ('fd_interest', 'FD INTEREST DEBIT'),
+    ('other_received', 'EXTERNAL LOAN CREDIT'),
+    ('other_repaid', 'EXTERNAL LOAN DEBIT'),
+    ('other_interest', 'EXTERNAL LOAN INTEREST DEBIT'),
+    ('general_expense', 'EXPENCE'),
+    ('general_income', 'OTHER INCOME'),
+)
+
 # Report families combine principal debit/credit and actual interest.
 CATEGORY_TYPES = {
     'stl': ('loan_disbursed', 'loan_repaid', 'loan_interest'),
@@ -32,8 +50,8 @@ CATEGORY_TYPES = {
     'transfers': ('transfer_out', 'transfer_in'),
 }
 CATEGORY_REPORTS = dict(zip(CATEGORY_TYPES, (
-    'STL Loans report', 'Fixed Deposits report', 'External Loans report',
-    'Hand Loans Given report', 'Finance Hand Loans report',
+    'STL Loans report', 'Fixed Deposits report', 'External Loan report',
+    'Hand Loan report', 'Finance Hand Loans report',
     'Office Expenses report', 'Other Income report', 'Cash / Bank Transfers report',
 )))
 

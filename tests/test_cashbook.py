@@ -129,7 +129,7 @@ class CashbookCase(unittest.TestCase):
         account=self.ledger.entries()[0]['finance_id']
         self.ledger.post_cashbook(type_key='loan_repaid',amount_paise=100_000,interest_paise=1000,tx_date='2026-01-03',cash_id=self.cash,idempotency_key='receipt',finance_id=account,particulars='Receipt')
         self.ledger.post_cashbook(type_key='general_expense',amount_paise=500,tx_date='2026-01-03',cash_id=self.cash,idempotency_key='office',particulars='Water')
-        report=build_report(self.ledger,CATEGORY_REPORTS['stl'],'2026-01-01','2026-01-31',type='loan_repaid',module='fd')
+        report=build_report(self.ledger,CATEGORY_REPORTS['stl'],'2026-01-01','2026-01-31',module='fd')
         self.assertEqual(len(report.rows),5)
         self.assertEqual(report.rows[-1][4:7],[101_000,1_000_000,-899_000])
         self.assertEqual(report.rows[2][4],100_000)  # principal repayment
@@ -143,6 +143,26 @@ class CashbookCase(unittest.TestCase):
             self.assertTrue(all(len(r)==len(result.columns) for r in result.rows))
         self.assertEqual(len(CATEGORY_REPORTS),8)
         self.assertEqual(set(TRANSACTION_DETAILS),set(TYPES)-{'transfer_in'})
+
+    def test_report_type_filter_matches_each_option_and_keeps_filtered_opening(self):
+        from finance_ledger.categories import REPORT_TYPE_CHOICES
+        self.ledger.post_cashbook(**self.request)
+        account=self.ledger.entries()[0]['finance_id']
+        self.ledger.post_cashbook(type_key='loan_repaid',amount_paise=100_000,interest_paise=1000,
+            tx_date='2026-01-03',cash_id=self.cash,finance_id=account,idempotency_key='filter-receipt')
+        self.assertEqual(len(REPORT_TYPE_CHOICES),12)
+        self.assertEqual(REPORT_TYPE_CHOICES[0],(None,'All transaction'))
+        for key,label in REPORT_TYPE_CHOICES[1:]:
+            report=build_report(self.ledger,CASHBOOK_REPORT,'2026-01-01','2026-01-31',type=key)
+            self.assertTrue(all(r[3]==TRANSACTION_DETAILS[key] for r in report.rows[1:-1]),label)
+        filtered=build_report(self.ledger,CATEGORY_REPORTS['stl'],'2026-01-01','2026-01-31',type='loan_repaid')
+        self.assertEqual(len(filtered.rows),3)
+        self.assertEqual(filtered.rows[-1][4:7],[100_000,0,100_000])
+        later=build_report(self.ledger,CATEGORY_REPORTS['stl'],'2026-01-04','2026-01-31',type='loan_repaid')
+        self.assertEqual(later.rows[0][-1],100_000)
+        self.assertEqual(later.rows[-1][-1],100_000)
+        all_rows=build_report(self.ledger,CATEGORY_REPORTS['stl'],'2026-01-01','2026-01-31',type=None)
+        self.assertEqual(len(all_rows.rows),5)
 
     def test_compact_report_columns_and_export_keep_location_and_balances(self):
         from openpyxl import load_workbook
@@ -284,13 +304,31 @@ class QuickEntryCase(unittest.TestCase):
         self.assertEqual(self.ledger.dashboard('2026-01-01','2026-01-31')['interest_received'],1000)
 
     def test_ambiguous_or_missing_accounts_never_guess_or_create_opening_debt(self):
-        with self.assertRaisesRegex(ValueError,'original principal'): self.quick(type_key='loan_repaid',direction='IN')
-        self.assertEqual(self.ledger.parties(),[])
         self.quick()
         self.ledger.add_finance('SECOND',1,'loan','2026-01-01')
         with self.assertRaisesRegex(ValueError,'More than one finance account'):
             self.quick(type_key='loan_repaid',direction='IN',idempotency_key='ambiguous')
         self.assertEqual(len(self.ledger.entries()),1)
+
+    def test_missing_fd_history_saves_cash_movement_without_inventing_principal(self):
+        group=self.quick(name='Nirmal',place_name='Karur',type_key='fd_repaid',direction='OUT',amount_paise=1_000_000)
+        self.assertEqual(self.quick(name='Nirmal',place_name='Karur',type_key='fd_repaid',direction='OUT',amount_paise=1_000_000),group)
+        entry=self.ledger.entries()[0]
+        self.assertEqual((entry['party_name'],entry['place_name'],entry['module']),('Nirmal','Karur','fd'))
+        self.assertIsNone(entry['finance_id'])
+        self.assertEqual(self.ledger.finance_accounts(),[])
+        self.assertEqual(self.ledger.cash_balance(self.cash,'2026-01-31'),9_000_000)
+        report=build_report(self.ledger,CATEGORY_REPORTS['fd'],'2026-01-01','2026-01-31',module='fd')
+        self.assertEqual(report.rows[-1][5],1_000_000)
+        self.quick(name='Nirmal',type_key='fd_interest',direction='OUT',amount_paise=2000,idempotency_key='unlinked-interest')
+        self.assertEqual(self.ledger.dashboard('2026-01-01','2026-01-31')['fd_interest'],2000)
+        replacement=self.ledger.edit_entry(group,name='Nirmal',place_name='Karur',amount_paise=1_100_000,
+            direction='OUT',type_key='fd_repaid',tx_date='2026-02-01',reason='Correct amount',idempotency_key='unlinked-edit')
+        self.assertIsNone(next(r for r in self.ledger.entries() if r['group_id']==replacement)['finance_id'])
+        self.assertEqual(self.ledger.cash_balance(self.cash,'2026-02-01'),8_898_000)
+        self.ledger.reverse(replacement,'2026-02-02','Correction','unlinked-reverse')
+        self.assertEqual(self.ledger.cash_balance(self.cash,'2026-02-02'),9_998_000)
+        self.assertEqual(self.ledger.finance_accounts(),[])
 
     def test_direction_mismatch_does_not_write(self):
         with self.assertRaisesRegex(ValueError,'matching IN/OUT'): self.quick(direction='IN')

@@ -24,10 +24,10 @@ TYPES = {
  'loan_disbursed': TransactionType('Loan disbursement', 'loan', -1, 1),
  'loan_repaid': TransactionType('Loan principal repayment', 'loan', 1, -1),
  'loan_interest': TransactionType('Loan interest received', 'loan', 1, 0, True),
- 'other_received': TransactionType('Other finance principal received', 'other', 1, 1),
- 'other_repaid': TransactionType('Other finance principal repaid', 'other', -1, -1),
- 'other_interest': TransactionType('Other finance interest paid', 'other', -1, 0, True),
- 'hand_given_disbursed': TransactionType('Hand loan given', 'hand_given', -1, 1),
+ 'other_received': TransactionType('External Loan principal received', 'other', 1, 1),
+ 'other_repaid': TransactionType('External Loan principal repaid', 'other', -1, -1),
+ 'other_interest': TransactionType('External Loan interest paid', 'other', -1, 0, True),
+ 'hand_given_disbursed': TransactionType('Hand loan', 'hand_given', -1, 1),
  'hand_given_repaid': TransactionType('Hand loan principal received', 'hand_given', 1, -1),
  'hand_given_interest': TransactionType('Hand loan interest received', 'hand_given', 1, 0, True),
  'hand_taken_received': TransactionType('Hand loan taken', 'hand_taken', 1, 1),
@@ -38,7 +38,9 @@ TYPES = {
  'transfer_in': TransactionType('Internal transfer in', None, 1),
  'transfer_out': TransactionType('Internal transfer out', None, -1),
 }
-MODULES = {'fd':'Fixed Deposits','loan':'Loans','other':'Other Finance','hand_given':'Hand Loans Given','hand_taken':'Hand Loans Taken'}
+MODULES = {'fd':'Fixed Deposits','loan':'Loans','other':'External Loan','hand_given':'Hand Loan','hand_taken':'Hand Loans Taken'}
+ENTRY_MODULE_SQL = "COALESCE(f.module,CASE e.type " + ' '.join("WHEN '"+key+"' THEN '"+spec.module+"'" for key,spec in TYPES.items() if spec.module) + " END)"
+
 METHODS = ('cash', 'bank transfer', 'UPI', 'cheque', 'other')
 
 
@@ -208,8 +210,7 @@ class Ledger:
                     if party_id is None:
                         party_id=self.save_party({'name':name,'roles':MODULES[spec.module]})
                     finance_id=self.add_finance(spec.module.upper()+'-'+uuid.uuid4().hex[:10].upper(),party_id,spec.module,tx_date)
-                else:
-                    raise ValueError('No existing finance account matches this name and category. Record the original principal entry first.')
+                # A missing account is allowed: record the cash movement without inventing principal history.
             cash=self.db.one('SELECT kind FROM cash_accounts WHERE id=?',(cash_id,))
             category_id=None
             if type_key.startswith('general'):
@@ -219,7 +220,7 @@ class Ledger:
             group=self.post(tx_date=tx_date,components=[(type_key,amount_paise)],cash_id=cash_id,
                             idempotency_key=idempotency_key,party_id=party_id,finance_id=finance_id,
                             category_id=category_id,method='cash' if cash and cash['kind']=='cash' else 'bank transfer',
-                            place_name=place_name,entry_name=name)
+                            place_name=place_name,entry_name=name,allow_unallocated=bool(spec.module and finance_id is None))
             self.db.audit('transaction',group,'quick_entry',after=request | {'fingerprint':fingerprint})
             return group
 
@@ -293,7 +294,7 @@ class Ledger:
                              external_ref=external_ref, notes=notes, transfer_to=transfer_to,
                              particulars=particulars.strip(), intake_fingerprint=fingerprint, place_name=place_name.strip())
 
-    def post(self, *, tx_date, components, cash_id, idempotency_key, party_id=None, finance_id=None, category_id=None, method='cash', external_ref='', notes='', transfer_to=None, particulars='', intake_fingerprint='', place_name='', entry_name=''):
+    def post(self, *, tx_date, components, cash_id, idempotency_key, party_id=None, finance_id=None, category_id=None, method='cash', external_ref='', notes='', transfer_to=None, particulars='', intake_fingerprint='', place_name='', entry_name='', allow_unallocated=False):
         valid_date(tx_date)
         if not components or not idempotency_key or method not in METHODS:
             raise ValueError('Choose a transaction type, payment method and a submission key.')
@@ -302,6 +303,7 @@ class Ledger:
         payload = dict(tx_date=tx_date,components=components,cash_id=cash_id,party_id=party_id,finance_id=finance_id,category_id=category_id,method=method,external_ref=external_ref,notes=notes,transfer_to=transfer_to,particulars=particulars,intake_fingerprint=intake_fingerprint)
         if place_name.strip(): payload['place_name'] = place_name.strip()
         if entry_name.strip(): payload['entry_name'] = entry_name.strip()
+        if allow_unallocated: payload['allow_unallocated'] = True
         fingerprint = hashlib.sha256(json.dumps(payload,sort_keys=True).encode()).hexdigest()
         with self.db.atomic():
             existing = self.db.one('SELECT * FROM posting_groups WHERE idempotency_key=?', (idempotency_key,))
@@ -343,7 +345,7 @@ class Ledger:
                 if not spec:
                     raise ValueError('Unknown transaction type.')
                 if spec.module:
-                    if not finance or spec.module != finance['module']:
+                    if (not finance and not allow_unallocated) or (finance and spec.module != finance['module']):
                         raise ValueError('Transaction type does not match the linked finance account.')
                     if category_id:
                         raise ValueError('Finance entries cannot have a general income/expense category.')
@@ -417,7 +419,8 @@ class Ledger:
                     replacement=self.post(tx_date=tx_date,components=components,cash_id=main['cash_id'],
                         finance_id=main['finance_id'],party_id=main['party_id'],category_id=category_id,
                         idempotency_key=idempotency_key,method=original['method'],external_ref=original['external_ref'],
-                        notes=original['notes'],particulars=original['particulars'],entry_name=name.strip(),place_name=place_name.strip())
+                        notes=original['notes'],particulars=original['particulars'],entry_name=name.strip(),place_name=place_name.strip(),
+                        allow_unallocated=bool(spec.module and main['finance_id'] is None))
                 else:
                     replacement=self.post_quick_entry(name=name,place_name=place_name,amount_paise=amount_paise,
                         direction=direction,type_key=type_key,tx_date=tx_date,cash_id=main['cash_id'],idempotency_key=idempotency_key)
@@ -465,11 +468,11 @@ class Ledger:
         if start > end:
             raise ValueError('Start date must be on or before end date.')
         where, args = ['g.tx_date BETWEEN ? AND ?'], [start,end]
-        for key, column in {'party_id':'e.party_id','finance_id':'e.finance_id','cash_id':'e.cash_id','type':'e.type','category_id':'e.category_id','module':'f.module','status':'f.status'}.items():
+        for key, column in {'party_id':'e.party_id','finance_id':'e.finance_id','cash_id':'e.cash_id','type':'e.type','category_id':'e.category_id','module':ENTRY_MODULE_SQL,'status':'f.status'}.items():
             if filters.get(key) not in (None,''):
                 where.append(column+'=?'); args.append(filters[key])
-        query = '''SELECT e.*, g.reference,g.tx_date,g.method,g.external_ref,g.notes,g.particulars,g.place_name,g.created_by,g.created_at,g.reversal_of,
-        COALESCE(NULLIF(g.entry_name,''),p.name) party_name,f.reference finance_reference,f.module,f.status,c.name cash_name,cat.name category_name,
+        query = f'''SELECT e.*, g.reference,g.tx_date,g.method,g.external_ref,g.notes,g.particulars,g.place_name,g.created_by,g.created_at,g.reversal_of,
+        COALESCE(NULLIF(g.entry_name,''),p.name) party_name,f.reference finance_reference,{ENTRY_MODULE_SQL} module,f.status,c.name cash_name,cat.name category_name,
         (SELECT r.reference FROM posting_groups r WHERE r.reversal_of=g.id) reversed_by
         FROM entries e JOIN posting_groups g ON g.id=e.group_id
         LEFT JOIN parties p ON p.id=e.party_id LEFT JOIN finance_accounts f ON f.id=e.finance_id

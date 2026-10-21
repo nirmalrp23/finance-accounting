@@ -35,24 +35,32 @@ def run():
                 app.show(page); app.update()
                 assert not errors,errors
                 print('PAGE OK:',page)
-            for key,name in CATEGORY_REPORTS.items():
-                app.report_nav.selection_set(key)
+            from finance_ledger.categories import REPORT_TYPE_CHOICES, transaction_detail
+            app.show('Reports'); app.update()
+            assert list(app.report_name.cget('values'))==[label for key,label in REPORT_TYPE_CHOICES]
+            for key,label in REPORT_TYPE_CHOICES:
+                app.report_nav.selection_set(key or 'all')
                 app.report_nav.event_generate('<<TreeviewSelect>>'); app.update()
-                assert app.page=='Reports'
-                assert app.report_name.get()==name
-                from finance_ledger.reports import build_report
-                compact=build_report(app.ledger,name,app.start,app.end)
-                assert compact.columns[:6]==['Date','Name','Place Name','Transaction Details','Amount In','Amount Out']
-                assert len(compact.columns)==7
-                assert app.report_type.selected() is None
-                assert str(app.report_type.cget('state'))=='disabled'
-                assert not forms(),'A report menu must not create an entry form'
+                assert app.page=='Reports' and app.report_name.get()==label
+                assert app.current_report.title==label
+                assert len(app.current_report.columns)==7
+                if key:
+                    assert all(row[3]==transaction_detail(key) for row in app.current_report.rows[1:-1])
+                assert not forms() and not errors,errors
+            app.open_cashbook_report(); app.update()
+            for key,label in REPORT_TYPE_CHOICES:
+                app.report_name.set(label)
+                app.report_name.event_generate('<<ComboboxSelected>>'); app.update()
+                assert app.active_report_filter==key
+                assert app.current_report.title==label
+                if key: assert all(row[3]==transaction_detail(key) for row in app.current_report.rows[1:-1])
                 assert not errors,errors
-            print('REPORT MENUS OK:',len(CATEGORY_REPORTS))
-            app.report_search.set('Fixed'); app.update()
-            assert app.report_nav.exists('fd') and not app.report_nav.exists('stl')
+            assert not hasattr(app,'report_type'),'No duplicate transaction filter'
+            print('REPORT MENUS OK:',len(REPORT_TYPE_CHOICES))
+            app.report_search.set('FD'); app.update()
+            assert app.report_nav.exists('fd_received') and not app.report_nav.exists('loan_repaid')
             app.report_search.set(''); app.update()
-            assert all(app.report_nav.exists(key) for key in CATEGORY_REPORTS)
+            assert all(app.report_nav.exists(key or 'all') for key,label in REPORT_TYPE_CHOICES)
             app.show('Dashboard')
             for action in [app.party_form,lambda:app.finance_form('fd'),app.cash_form,app.transaction_form,lambda:app.transaction_form('transfer_out'),lambda:app.edit_finance(1),lambda:app.estimate_form(2),app.category_form]:
                 action(); app.update()
@@ -70,6 +78,9 @@ def run():
             assert 'STL LOAN CREDIT' in form.fields['type'].cget('values')
             form.fields['direction'].buttons['OUT'].invoke(); app.update()
             assert 'STL LOAN CREDIT' not in form.fields['type'].cget('values')
+            assert 'FINANCE HAND LOAN INTEREST DEBIT' not in form.fields['type'].cget('values')
+            form.fields['direction'].buttons['IN'].invoke(); app.update()
+            assert 'HAND LOAN INTEREST CREDIT' not in form.fields['type'].cget('values')
             close_popups()
             # New name/account creation is automatic and atomic; invalid input retains all five values.
             form=app.transaction_form('fd_received'); app.update()
@@ -81,6 +92,12 @@ def run():
             entry=next(r for r in app.ledger.entries() if r['party_name']=='GUI New Depositor')
             assert entry['place_name']=='Salem' and entry['type']=='fd_received'
             assert app.ledger.principal(entry['finance_id'])==100000
+            # FD debit can be recorded before any FD account/history exists.
+            form=app.transaction_form('fd_repaid'); app.update()
+            put(form,'party','Nirmal'); put(form,'place_name','Karur'); put(form,'amount','10000')
+            form.submit(); app.update(); assert not forms()
+            debit=next(r for r in app.ledger.entries() if r['party_name']=='Nirmal')
+            assert debit['amount_paise']==1000000 and debit['finance_id'] is None and debit['module']=='fd'
             # An existing borrower is resolved from plain text, including case-insensitive matching.
             form=app.transaction_form('loan_repaid'); app.update()
             put(form,'party','ravi kumar'); put(form,'amount','100'); form.submit(); app.update()
@@ -139,7 +156,7 @@ def run():
             assert form.fields['amount'].get()=='100'
             close_popups()
             assert not errors,errors
-        print('GUI SMOKE PASSED: six pages, eight reports, five-field text-name entry, direction buttons, automatic finance matching, free-text expenses, retention, audited editing, transfers and search.')
+        print('GUI SMOKE PASSED: six pages, twelve report choices, five-field text-name entry, direction buttons, automatic finance matching, free-text expenses, retention, audited editing, transfers and search.')
         app.close()
 
 

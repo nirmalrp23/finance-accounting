@@ -9,7 +9,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from . import __version__
 from .ledger import Ledger, METHODS, MODULES, TYPES
-from .categories import CATEGORY_REPORTS, TRANSACTION_DETAILS, transaction_detail
+from .categories import CATEGORY_REPORTS, TRANSACTION_DETAILS, ENTRY_DETAILS, REPORT_TYPE_CHOICES, transaction_detail
 from .money import money, paise, today, valid_date
 from .reports import CASHBOOK_REPORT, REPORT_NAMES, Report, build_report, cashbook_balances, export_report
 
@@ -273,7 +273,7 @@ class Application(tk.Tk):
     def __init__(self,database,demo=False):
         super().__init__()
         self.db = database; self.ledger = Ledger(database); self.demo = demo
-        self.page = 'Dashboard'; self.start = today()[:8]+'01'; self.end = today(); self.active_report = CASHBOOK_REPORT
+        self.page = 'Dashboard'; self.start = today()[:8]+'01'; self.end = today(); self.active_report = CASHBOOK_REPORT; self.active_report_filter = None
         self.title('Finance Ledger '+__version__+(' — DEMO' if demo else '')); self.geometry('1280x820'); self.minsize(960,640)
         self.configure(bg=BG)
         self._style()
@@ -327,10 +327,9 @@ class Application(tk.Tk):
     def _filter_report_nav(self):
         for iid in self.report_nav.get_children(): self.report_nav.delete(iid)
         term=self.report_search.get().casefold().strip(); count=0
-        for key, title in CATEGORY_REPORTS.items():
-            label=title.removesuffix(' report')
+        for key,label in REPORT_TYPE_CHOICES:
             if term and term not in label.casefold(): continue
-            self.report_nav.insert('', 'end',iid=key,text=label); count+=1
+            self.report_nav.insert('', 'end',iid=key or 'all',text=label); count+=1
         self.report_count.configure(text=f'{count} categories · type to find a report')
 
     def _style(self):
@@ -357,8 +356,9 @@ class Application(tk.Tk):
 
     def open_category_report(self,event=None):
         selected=self.report_nav.selection()
-        if selected and selected[0] in CATEGORY_REPORTS:
-            self.active_report=CATEGORY_REPORTS[selected[0]]
+        if selected:
+            self.active_report_filter=None if selected[0]=='all' else selected[0]
+            self.active_report=CASHBOOK_REPORT
             self.show('Reports')
 
     def business_name(self):
@@ -407,8 +407,8 @@ class Application(tk.Tk):
         principal=value_panel(panels,'Principal outstanding','As of '+self.end,[
             ('Fixed deposits',stats['principal']['fd'],'Payable',INK),
             ('STL loans',stats['principal']['loan'],'Receivable',GREEN),
-            ('External loans',stats['principal']['other'],'Payable',INK),
-            ('Hand loans given',stats['principal']['hand_given'],'Receivable',GREEN),
+            ('External Loan',stats['principal']['other'],'Payable',INK),
+            ('Hand Loan',stats['principal']['hand_given'],'Receivable',GREEN),
             ('Finance hand loans',stats['principal']['hand_taken'],'Payable',INK)])
         interest=value_panel(panels,'Actual interest','Posted amounts for the selected period',[
             ('Interest received',stats['interest_received'],'',GREEN),
@@ -494,7 +494,7 @@ class Application(tk.Tk):
         ttk.Button(head,text='Interest estimate',command=lambda:self.estimate_form(account_id)).pack(side='right',padx=8)
         ttk.Label(window,text=f'{MODULES[a["module"]]}   |   {a["status"].upper()}   |   Agreed rate {a["annual_rate"]}% p.a.   |   Principal as of {self.end}: {money(self.ledger.principal(account_id,self.end))}',padding=(20,0)).pack(anchor='w')
         body=ttk.Frame(window,padding=20); body.pack(fill='both',expand=True)
-        name={'fd':'Individual FD statement','loan':'Individual loan statement','other':'Other finance statement'}.get(a['module'],'Overall Amount In / Amount Out')
+        name={'fd':'Individual FD statement','loan':'Individual loan statement','other':'External Loan statement'}.get(a['module'],'Overall Amount In / Amount Out')
         report=build_report(self.ledger,name,self.start,self.end,finance_id=account_id)
         self.report_widget(body,report)
 
@@ -542,7 +542,7 @@ class Application(tk.Tk):
             self.cash_form(); return
         cash=next((a for a in cash_accounts if a['kind']=='cash'),cash_accounts[0])
         entry_date=today(); submission_key=str(uuid.uuid4())
-        options={key:label for key,label in TRANSACTION_DETAILS.items() if key!='transfer_out'}
+        options={key:label for key,label in ENTRY_DETAILS.items() if key!='transfer_out'}
         initial=initial or 'loan_disbursed'
         def save(form):
             values=form.values()
@@ -687,7 +687,9 @@ class Application(tk.Tk):
         main=next((r for r in rows if not r['interest'] and r['type']!='transfer_in'),rows[0])
         transfer=main['type']=='transfer_out'
         correction_date=max(today(),group['tx_date']); key=str(uuid.uuid4())
-        options={'transfer_out':TRANSACTION_DETAILS['transfer_out']} if transfer else {k:v for k,v in TRANSACTION_DETAILS.items() if k!='transfer_out'}
+        options={'transfer_out':TRANSACTION_DETAILS['transfer_out']} if transfer else {k:v for k,v in ENTRY_DETAILS.items() if k!='transfer_out'}
+        if main['type'] in ('hand_taken_interest','hand_given_interest'):
+            options[main['type']]=transaction_detail(main['type'])  # keep existing history editable
         def save(form):
             values=form.values(); type_key=next((k for k,v in options.items() if v==values['type']),None)
             self.ledger.edit_entry(group_id,name=values['party'],place_name=values['place_name'],
@@ -761,7 +763,9 @@ class Application(tk.Tk):
         self.toolbar('Historical balances are reconstructed at the selected end date. Exports are generated locally.')
         self.date_bar(self.content,lambda:self.show('Reports'))
         bar=ttk.Frame(self.content); bar.pack(fill='x',pady=6)
-        self.report_name=ttk.Combobox(bar,values=REPORT_NAMES,state='readonly',width=42); self.report_name.set(self.active_report); self.report_name.pack(side='left')
+        self.report_name=ttk.Combobox(bar,values=[label for key,label in REPORT_TYPE_CHOICES],state='readonly',width=42)
+        self.report_name.set(dict(REPORT_TYPE_CHOICES).get(self.active_report_filter,'All transaction')); self.report_name.pack(side='left')
+        self.report_name.bind('<<ComboboxSelected>>',lambda event:self.guard(self.generate_report))
         ttk.Button(bar,text='Generate report',style='Primary.TButton',command=lambda:self.guard(self.generate_report)).pack(side='left',padx=10)
         filters=card(self.content,16); filters.pack(fill='x',pady=(8,8))
         self.report_party=self.filter_field(filters,'Party / Name',[(None,'All parties')]+self.party_choices(),0)
@@ -769,24 +773,21 @@ class Application(tk.Tk):
         self.report_cash=self.filter_field(filters,'Cash / Bank',[(None,'All payment accounts')]+self.cash_choices(),2)
         self.report_module=self.filter_field(filters,'Module',[(None,'All modules')]+list(MODULES.items()),0,1)
         self.report_status=self.filter_field(filters,'Account status',[(None,'All statuses')]+[(s,s.title()) for s in ('active','matured','closed')],1,1)
-        self.report_type=self.filter_field(filters,'Transaction category',[(None,'All transaction categories')]+list(TRANSACTION_DETAILS.items()),2,1)
         self.report_body=ttk.Frame(self.content); self.report_body.pack(fill='both',expand=True,pady=10)
         self.generate_report()
 
     def open_cashbook_report(self):
+        self.active_report_filter=None
         self.active_report=CASHBOOK_REPORT
         self.show('Reports')
 
     def generate_report(self):
-        self.active_report=self.report_name.get()
-        category=next((key for key,label in CATEGORY_REPORTS.items() if label==self.active_report),None)
-        if category:
-            self.report_type.select_key(None); self.report_type.configure(state='disabled')
-            self.report_module.select_key(None); self.report_module.configure(state='disabled')
-        elif str(self.report_type.cget('state'))=='disabled':
-            self.report_type.configure(state='normal'); self.report_type.select_key(None)
-            self.report_module.configure(state='normal')
-        report=build_report(self.ledger,self.report_name.get(),self.start,self.end,party_id=self.report_party.selected(),finance_id=self.report_finance.selected(),cash_id=self.report_cash.selected(),module=self.report_module.selected(),status=self.report_status.selected(),type=self.report_type.selected())
+        selected=self.report_name.get()
+        if selected not in dict(REPORT_TYPE_CHOICES).values(): raise ValueError('Select a report.')
+        self.active_report_filter=next(key for key,label in REPORT_TYPE_CHOICES if label==selected)
+        report=build_report(self.ledger,CASHBOOK_REPORT,self.start,self.end,party_id=self.report_party.selected(),finance_id=self.report_finance.selected(),cash_id=self.report_cash.selected(),module=self.report_module.selected(),status=self.report_status.selected(),type=self.active_report_filter)
+        report.title=selected
+        self.current_report=report
         for child in self.report_body.winfo_children(): child.destroy()
         self.report_widget(self.report_body,report)
 

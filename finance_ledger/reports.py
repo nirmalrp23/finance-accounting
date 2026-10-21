@@ -14,8 +14,8 @@ CASHBOOK_REPORT = 'Cash book (all accounts)'
 REPORT_NAMES = (
  CASHBOOK_REPORT,
  'Overall Amount In / Amount Out', 'Cash book / Bank ledger', 'FD summary', 'Individual FD statement',
- 'Loan summary', 'Individual loan statement', 'Other finance summary', 'Other finance statement',
- 'Hand loans given / taken', 'Interest received', 'Interest paid by category', 'Party statement',
+ 'Loan summary', 'Individual loan statement', 'External Loan summary', 'External Loan statement',
+ 'Hand Loan / Finance Hand Loan', 'Interest received', 'Interest paid by category', 'Party statement',
  'Principal outstanding as of date', 'Monthly summary', 'General income / expense',
 ) + tuple(CATEGORY_REPORTS.values())
 
@@ -60,8 +60,7 @@ def build_cashbook_report(ledger, name, start, end, **filters):
     category = next((key for key, label in CATEGORY_REPORTS.items() if label == name), None)
     filters = dict(filters)
     if category:
-        # A family report must always include debit, credit and interest.
-        filters.pop('type', None)
+        # All transaction shows the family; a selected type narrows its entries.
         filters.pop('module', None)
     def entries(first, last):
         result = ledger.entries(first, last, **filters)
@@ -73,6 +72,8 @@ def build_cashbook_report(ledger, name, start, end, **filters):
         selected = [r for r in selected if not r['type'].startswith('transfer')]
     before = previous(start)
     notes = ['Category means Transaction Details. Cash In / Cash Out are derived from the category. Principal and actual interest remain separate.']
+    if any(r['module'] and not r['finance_id'] for r in selected):
+        notes.append('Finance entries without linked account history are included in cash movements; they do not create opening principal or change linked-account outstanding balances.')
     if complete:
         opening, closing, balances = cashbook_balances(ledger, start, end, cash_id)
         accounts = [a for a in ledger.cash_accounts() if not cash_id or a['id'] == cash_id]
@@ -125,8 +126,8 @@ def build_report(ledger, name, start, end, **filters):
     cash_id = filters.get('cash_id')
     party_id = filters.get('party_id')
     notes = ['Principal movements are separate from income and expenses. Reversals reduce the original Amount In/Out on the reversal date.', 'Actual posted amounts only; interest estimates are excluded.']
-    if name in ('FD summary','Loan summary','Other finance summary','Hand loans given / taken','Principal outstanding as of date'):
-        modules = {'FD summary':{'fd'},'Loan summary':{'loan'},'Other finance summary':{'other'},'Hand loans given / taken':{'hand_given','hand_taken'}}.get(name,set(MODULES))
+    if name in ('FD summary','Loan summary','External Loan summary','Hand Loan / Finance Hand Loan','Principal outstanding as of date'):
+        modules = {'FD summary':{'fd'},'Loan summary':{'loan'},'External Loan summary':{'other'},'Hand Loan / Finance Hand Loan':{'hand_given','hand_taken'}}.get(name,set(MODULES))
         rows = []
         for a in ledger.finance_accounts():
             if a['start_date'] > end or a['module'] not in modules or (party_id and a['party_id']!=party_id) or (account_id and a['id']!=account_id) or (filters.get('status') and a['status']!=filters['status']) or (filters.get('module') and a['module']!=filters['module']):
@@ -145,7 +146,7 @@ def build_report(ledger, name, start, end, **filters):
                 rows.append(['TOTAL','','',position,'']+[sum(row[i] for row in selected) for i in range(5,11)])
         return Report(name,period,['Account','Party','Module','Position','Status','Opening principal','Opening introduced','Amount In','Amount Out','Closing principal','Net actual interest'],rows,{5,6,7,8,9,10},notes+['Closing principal is reconstructed as of the end date. Opening introduced is a non-cash brought-forward balance. Movement filters apply to movements only; principal balances always include all principal entries. Status is the currently recorded account status. Receivable and liability totals remain separate.'])
     if 'statement' in name and name != 'Party statement':
-        module = {'Individual FD statement':'fd','Individual loan statement':'loan','Other finance statement':'other'}[name]
+        module = {'Individual FD statement':'fd','Individual loan statement':'loan','External Loan statement':'other'}[name]
         if not account_id:
             raise ValueError('Select a finance account for this statement.')
         a = ledger.db.one('SELECT * FROM finance_accounts WHERE id=?', (account_id,))
