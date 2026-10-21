@@ -2,6 +2,7 @@
 import sys
 import tempfile
 import tkinter as tk
+from tkinter import ttk
 from pathlib import Path
 from unittest.mock import patch
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
@@ -42,12 +43,32 @@ def run():
                 assert not forms(),'A report menu must not create an entry form'
                 assert not errors,errors
             print('REPORT MENUS OK:',len(CATEGORY_REPORTS))
+            app.report_search.set('FD'); app.update()
+            assert app.report_nav.exists('fd_received') and not app.report_nav.exists('loan_disbursed')
+            app.report_search.set(''); app.update()
+            assert all(app.report_nav.exists(key) for key in CATEGORY_REPORTS)
             app.show('Dashboard')
             for action in [app.party_form,lambda:app.finance_form('fd'),app.cash_form,app.transaction_form,lambda:app.transaction_form('transfer_out'),lambda:app.edit_finance(1),lambda:app.estimate_form(2),app.category_form]:
                 action(); app.update()
                 assert forms(),'Expected an input form'
                 assert forms()[0].winfo_height()<=app.winfo_screenheight(),'Form does not fit screen'
                 close_popups()
+            # Common-entry details stay compact; creation controls reveal fields in place.
+            form=app.transaction_form(); app.update()
+            def find_button(widget,phrase):
+                for child in widget.winfo_children():
+                    if isinstance(child,ttk.Button) and phrase in child.cget('text'): return child
+                    found=find_button(child,phrase)
+                    if found: return found
+                return None
+            assert not form.fields['notes'].winfo_ismapped()
+            toggle=find_button(form,'Additional details'); assert toggle is not None
+            toggle.invoke(); app.update(); assert form.fields['notes'].winfo_ismapped()
+            new_name=find_button(form,'+ New name'); assert new_name is not None
+            new_name.invoke(); app.update(); assert form.fields['party_name'].winfo_ismapped()
+            find_button(form,'Use existing name').invoke(); app.update()
+            assert not form.fields['party_name'].winfo_ismapped()
+            close_popups()
             # Failed save retains data, then the same form posts an atomic split.
             form=app.transaction_form('loan_repaid'); app.update()
             put(form,'amount','100'); form.fields['finance'].set('')
@@ -87,8 +108,11 @@ def run():
             app.show('Cash Book'); app.update()
             app.tx_search.insert(0,'Water Can'); app.filter_transactions()
             assert len(app.tx_rows)==1 and app.tx_rows[0]['type']=='general_expense'
+            app.toggle_transaction_filters(); app.update()
+            assert app.tx_min.winfo_ismapped()
             app.tx_sort.set('Amount high to low'); app.filter_transactions()
             assert expense['id'] in app.tx_balances
+            app.clear_transactions(); app.update(); assert len(app.tx_rows)>1
             for action in [lambda:app.party_detail(1),lambda:app.finance_detail(1),lambda:app.cash_detail(1),lambda:app.transaction_detail(latest[0]['group_id']),app.audit_window]:
                 action(); app.update(); close_popups()
             assert not errors,errors

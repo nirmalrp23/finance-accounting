@@ -1,5 +1,5 @@
 ; Optional Inno Setup 6 installer. Run after the Windows PyInstaller build.
-#define MyAppVersion "1.1.0"
+#define MyAppVersion "1.2.0"
 [Setup]
 AppId={{DF6D1579-64E2-451A-847B-5A1B81DE87B1}
 AppName=Finance Ledger
