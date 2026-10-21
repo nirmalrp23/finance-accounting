@@ -7,14 +7,17 @@ from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
 from .ledger import MODULES, TYPES
+from .categories import CATEGORY_REPORTS, transaction_detail
 from .money import money, valid_date
 
+CASHBOOK_REPORT = 'Cash book (all accounts)'
 REPORT_NAMES = (
+ CASHBOOK_REPORT,
  'Overall Amount In / Amount Out', 'Cash book / Bank ledger', 'FD summary', 'Individual FD statement',
  'Loan summary', 'Individual loan statement', 'Other finance summary', 'Other finance statement',
  'Hand loans given / taken', 'Interest received', 'Interest paid by category', 'Party statement',
  'Principal outstanding as of date', 'Monthly summary', 'General income / expense',
-)
+) + tuple(CATEGORY_REPORTS.values())
 
 
 @dataclass
@@ -34,12 +37,81 @@ def previous(day):
     return (date.fromisoformat(day)-timedelta(days=1)).isoformat() if day > '0001-01-01' else None
 
 
+def cashbook_balances(ledger, start, end, cash_id=None):
+    """Actual running cash, independent of list search/category/sort/pagination."""
+    accounts = [a for a in ledger.cash_accounts() if not cash_id or a['id'] == cash_id]
+    before = previous(start)
+    opening = sum(ledger.cash_balance(a['id'], before) for a in accounts) if before else 0
+    rows = ledger.entries(start, end, cash_id=cash_id)
+    events = [(r['tx_date'], r['created_at'], r['id'], r) for r in rows]
+    events += [(a['opening_date'], '', 0, a['opening_paise']) for a in accounts if start <= a['opening_date'] <= end]
+    balances, balance = {}, opening
+    for _, _, _, event in sorted(events, key=lambda e: e[:3]):
+        if isinstance(event, int):
+            balance += event
+        else:
+            if cash_id or not event['type'].startswith('transfer'):
+                balance += event['amount_paise'] * event['factor'] * event['direction']
+            balances[event['id']] = balance
+    return opening, balance, balances
+
+
+def build_cashbook_report(ledger, name, start, end, **filters):
+    category = next((key for key, label in CATEGORY_REPORTS.items() if label == name), None)
+    filters = dict(filters)
+    if category:
+        filters['type'] = category
+    selected = ledger.entries(start, end, **filters)
+    cash_id = filters.get('cash_id')
+    complete = not category and not any(filters.get(k) for k in ('party_id', 'finance_id', 'type', 'category_id', 'module', 'status'))
+    if not cash_id and not (category and category.startswith('transfer')):
+        selected = [r for r in selected if not r['type'].startswith('transfer')]
+    before = previous(start)
+    notes = ['Category means Transaction Details. Cash In / Cash Out are derived from the category. Principal and actual interest remain separate.']
+    if complete:
+        opening, closing, balances = cashbook_balances(ledger, start, end, cash_id)
+        accounts = [a for a in ledger.cash_accounts() if not cash_id or a['id'] == cash_id]
+        introductions = [(a['opening_date'], '', 0, a) for a in accounts if start <= a['opening_date'] <= end]
+        balance_label = 'Cash balance'
+        notes.append('Actual cash/bank balance. Opening introductions are non-cash. Internal transfers are excluded across all accounts and included for an individual payment account.')
+    else:
+        history = ledger.entries('0001-01-01', before, **filters) if before else []
+        if not (category and category.startswith('transfer')):
+            history = [r for r in history if not r['type'].startswith('transfer')]
+        opening = sum(r['amount_paise'] * r['factor'] * r['direction'] for r in history)
+        closing, balances, introductions = opening, {}, []
+        balance_label = 'Net category movement'
+        notes.append('Opening/closing are cumulative net movements for the selected category/filters, not actual cash or principal outstanding. Use the complete Cash Book for actual cash and account statements for principal.')
+    rows = [['', 'Opening balance', start, '', '', 0, 0, opening, '', '']]
+    balance, number = opening, 0
+    events = [(r['tx_date'], r['created_at'], r['id'], r) for r in selected] + introductions
+    for day, _, _, item in sorted(events, key=lambda e: e[:3]):
+        if 'group_id' not in item:
+            balance += item['opening_paise']
+            rows.append(['', 'Opening introduced (non-cash)', day, '', item['name'], 0, 0, balance, item['name'], ''])
+            continue
+        number += 1
+        amount = item['amount_paise'] * item['factor']
+        balance = balances[item['id']] if complete else balance + amount * item['direction']
+        rows.append([number, ('Reversal: ' if item['factor'] == -1 else '') + transaction_detail(item['type']), day,
+                     item['party_name'] or '', item['particulars'], amount if item['direction'] == 1 else 0,
+                     amount if item['direction'] == -1 else 0, balance, item['cash_name'], item['reference']])
+    if not complete:
+        closing = balance
+    rows.append(['', 'Closing / totals', end, '', '', sum(r[5] for r in rows), sum(r[6] for r in rows), closing, '', ''])
+    return Report(name, f'{start} to {end} · INR · Asia/Kolkata',
+                  ['S.No', 'Transaction Details / Category', 'Date', 'Name', 'Particulars / Description',
+                   'Cash In', 'Cash Out', balance_label, 'Cash / Bank', 'Reference'], rows, {5, 6, 7}, notes)
+
+
 def build_report(ledger, name, start, end, **filters):
     if name not in REPORT_NAMES:
         raise ValueError('Select a report.')
     valid_date(start); valid_date(end)
     if start > end:
         raise ValueError('Start date must be on or before end date.')
+    if name == CASHBOOK_REPORT or name in CATEGORY_REPORTS.values():
+        return build_cashbook_report(ledger, name, start, end, **filters)
     period = f'{start} to {end} · INR · Asia/Kolkata'
     before = previous(start)
     account_id = filters.get('finance_id')

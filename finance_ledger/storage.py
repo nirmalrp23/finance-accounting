@@ -4,6 +4,7 @@ import os
 import sqlite3
 import sys
 import tempfile
+import uuid
 from contextlib import closing, contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -82,6 +83,17 @@ class Database:
 
     @contextmanager
     def atomic(self):
+        if self.conn.in_transaction:
+            savepoint = 'nested_' + uuid.uuid4().hex
+            self.conn.execute(f'SAVEPOINT {savepoint}')
+            try:
+                yield
+                self.conn.execute(f'RELEASE SAVEPOINT {savepoint}')
+            except BaseException:
+                self.conn.execute(f'ROLLBACK TO SAVEPOINT {savepoint}')
+                self.conn.execute(f'RELEASE SAVEPOINT {savepoint}')
+                raise
+            return
         self.conn.execute('BEGIN IMMEDIATE')
         try:
             yield

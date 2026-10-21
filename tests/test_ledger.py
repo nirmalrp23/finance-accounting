@@ -120,7 +120,7 @@ class LedgerCase(unittest.TestCase):
     def test_duplicate_key_is_database_constrained(self):
         self.post('fd_received',1000,idempotency_key='unique')
         with self.assertRaises(sqlite3.IntegrityError):
-            self.db.conn.execute("INSERT INTO posting_groups SELECT 'other-id','OTHER-REF',idempotency_key,fingerprint,tx_date,method,external_ref,notes,NULL,created_by,created_at FROM posting_groups")
+            self.db.conn.execute("INSERT INTO posting_groups(id,reference,idempotency_key,fingerprint,tx_date,method,external_ref,notes,reversal_of,created_by,created_at) SELECT 'other-id','OTHER-REF',idempotency_key,fingerprint,tx_date,method,external_ref,notes,NULL,created_by,created_at FROM posting_groups")
 
     def test_transfer_atomic_and_excluded_from_overall(self):
         group=self.post('transfer_out',50_000,transfer_to=self.bank)
@@ -339,30 +339,31 @@ class LedgerCase(unittest.TestCase):
     def test_updates_preserve_records_and_backup_before_migration(self):
         self.post('fd_received',1000)
         self.db.close()
-        extended=MIGRATIONS+[(2,'CREATE TABLE migration_test(id INTEGER PRIMARY KEY);')]
+        version=MIGRATIONS[-1][0]+1
+        extended=MIGRATIONS+[(version,'CREATE TABLE migration_test(id INTEGER PRIMARY KEY);')]
         with patch('finance_ledger.storage.MIGRATIONS',extended):
             self.db=Database(self.temp.name,daily=False)
-            self.assertEqual(self.db.conn.execute('PRAGMA user_version').fetchone()[0],2)
+            self.assertEqual(self.db.conn.execute('PRAGMA user_version').fetchone()[0],version)
             self.assertEqual(self.db.one('SELECT COUNT(*) n FROM entries')['n'],1)
             backups=list((Path(self.temp.name)/'backups').glob('pre-migration-*'))
             self.assertEqual(len(backups),1)
             with closing(sqlite3.connect(backups[0])) as conn:
-                self.assertEqual(conn.execute('PRAGMA user_version').fetchone()[0],1)
+                self.assertEqual(conn.execute('PRAGMA user_version').fetchone()[0],MIGRATIONS[-1][0])
                 self.assertEqual(conn.execute('SELECT COUNT(*) FROM entries').fetchone()[0],1)
 
     def test_failed_migration_rolls_back_and_releases_lock(self):
         self.db.close()
-        with patch('finance_ledger.storage.MIGRATIONS',MIGRATIONS+[(2,'CREATE TABLE must_rollback(id INTEGER); SELECT nonexistent FROM nonexistent;')]):
+        with patch('finance_ledger.storage.MIGRATIONS',MIGRATIONS+[(MIGRATIONS[-1][0]+1,'CREATE TABLE must_rollback(id INTEGER); SELECT nonexistent FROM nonexistent;')]):
             with self.assertRaises(sqlite3.Error): Database(self.temp.name,daily=False)
         self.db=Database(self.temp.name,daily=False)
-        self.assertEqual(self.db.conn.execute('PRAGMA user_version').fetchone()[0],1)
+        self.assertEqual(self.db.conn.execute('PRAGMA user_version').fetchone()[0],MIGRATIONS[-1][0])
         self.assertIsNone(self.db.one("SELECT name FROM sqlite_master WHERE name='must_rollback'"))
 
     def test_newer_database_is_not_modified(self):
         self.db.conn.execute('PRAGMA user_version=999')
         self.db.close()
         with self.assertRaisesRegex(ValueError,'newer version'): Database(self.temp.name,daily=False)
-        with closing(sqlite3.connect(Path(self.temp.name)/'ledger.sqlite3')) as conn: conn.execute('PRAGMA user_version=1')
+        with closing(sqlite3.connect(Path(self.temp.name)/'ledger.sqlite3')) as conn: conn.execute(f'PRAGMA user_version={MIGRATIONS[-1][0]}')
         self.db=Database(self.temp.name,daily=False)
 
 

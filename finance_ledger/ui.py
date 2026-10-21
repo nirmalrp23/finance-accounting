@@ -8,8 +8,9 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from . import __version__
 from .ledger import Ledger, METHODS, MODULES, TYPES
+from .categories import CATEGORY_REPORTS, TRANSACTION_DETAILS, transaction_detail
 from .money import money, paise, today, valid_date
-from .reports import REPORT_NAMES, Report, build_report, export_report
+from .reports import CASHBOOK_REPORT, REPORT_NAMES, Report, build_report, cashbook_balances, export_report
 
 BG = '#f3f6f4'
 GREEN = '#175749'
@@ -51,7 +52,7 @@ class Form(tk.Toplevel):
     def __init__(self, parent, title, on_save, button='Save', help_text=''):
         super().__init__(parent)
         self.title(title); self.transient(parent.winfo_toplevel()); self.resizable(True,True)
-        self.configure(bg='white'); self.on_save = on_save; self.fields = {}; self.row = 0
+        self.configure(bg='white'); self.on_save = on_save; self.fields = {}; self.labels = {}; self.row = 0
         self.canvas = tk.Canvas(self,background=BG,highlightthickness=0)
         self.canvas.grid(row=0,column=0,sticky='nsew')
         scrollbar=ttk.Scrollbar(self,orient='vertical',command=self.canvas.yview)
@@ -79,13 +80,14 @@ class Form(tk.Toplevel):
     def _focus(self):
         self.update_idletasks()
         height=min(self.winfo_screenheight()-100,self.body.winfo_reqheight()+self.bottom.winfo_reqheight()+12)
-        self.geometry(f'760x{max(300,height)}')
+        self.geometry(f'800x{max(300,height)}')
         if self.fields:
             next(iter(self.fields.values())).focus_set()
         self.grab_set()
 
     def add(self,key,label,value='',choices=None,search=False,readonly=False):
-        ttk.Label(self.body,text=label).grid(row=self.row,column=0,sticky='w',padx=(0,18),pady=5)
+        self.labels[key] = ttk.Label(self.body,text=label)
+        self.labels[key].grid(row=self.row,column=0,sticky='w',padx=(0,18),pady=5)
         if search:
             widget = SearchCombo(self.body,choices or [],width=48)
             if value is not None: widget.select_key(value)
@@ -100,6 +102,16 @@ class Form(tk.Toplevel):
         widget.bind('<FocusIn>',lambda event:self.after_idle(lambda:self._ensure_visible(widget)),add='+')
         self.fields[key] = widget; self.row+=1
         return widget
+
+    def visible(self, keys, show):
+        for key in keys:
+            for widget in (self.labels[key], self.fields[key]):
+                widget.grid() if show else widget.grid_remove()
+
+    def fit(self):
+        self.update_idletasks()
+        height = min(self.winfo_screenheight()-100, self.body.winfo_reqheight()+self.bottom.winfo_reqheight()+12)
+        self.geometry(f'800x{max(300,height)}')
 
     def _ensure_visible(self,widget):
         if not widget.winfo_exists(): return
@@ -125,7 +137,7 @@ class Form(tk.Toplevel):
         self.destroy()
 
 
-def table(parent, columns, rows, money_cols=(), on_open=None, height=16, identifiers=None):
+def table(parent, columns, rows, money_cols=(), on_open=None, height=16, identifiers=None, widths=None):
     frame = ttk.Frame(parent)
     frame.pack(fill='both',expand=True,pady=(8,0))
     ids = [f'c{i}' for i in range(len(columns))]
@@ -138,8 +150,9 @@ def table(parent, columns, rows, money_cols=(), on_open=None, height=16, identif
     raw = {}
     for i,label in enumerate(columns):
         width = 155 if i in money_cols else (220 if any(term in label.lower() for term in ('name','type','notes','account')) else 150)
+        if widths: width=widths[i]
         tree.heading(ids[i],text=label)
-        tree.column(ids[i],width=width,minwidth=90,anchor='e' if i in money_cols else 'w',stretch=True)
+        tree.column(ids[i],width=width,minwidth=45 if widths else 90,anchor='e' if i in money_cols else 'w',stretch=True)
     for index,row in enumerate(rows):
         iid = str(identifiers[index]) if identifiers is not None else str(index)
         raw[iid] = row
@@ -165,29 +178,38 @@ def table(parent, columns, rows, money_cols=(), on_open=None, height=16, identif
 
 
 class Application(tk.Tk):
-    PAGES = ('Dashboard','Parties','Fixed Deposits','Loans','Other Finance','Hand Loans','Transactions','Cash & Bank','Reports','Settings')
+    PAGES = ('Dashboard','Cash Book','Parties','Reports','Cash & Bank','Settings')
     def __init__(self,database,demo=False):
         super().__init__()
         self.db = database; self.ledger = Ledger(database); self.demo = demo
-        self.page = 'Dashboard'; self.start = today()[:8]+'01'; self.end = today()
-        self.title('Finance Ledger'+(' — DEMO' if demo else '')); self.geometry('1280x820'); self.minsize(960,640)
+        self.page = 'Dashboard'; self.start = today()[:8]+'01'; self.end = today(); self.active_report = CASHBOOK_REPORT
+        self.title('Finance Ledger '+__version__+(' — DEMO' if demo else '')); self.geometry('1280x820'); self.minsize(960,640)
         self.configure(bg=BG)
         self._style()
-        self.sidebar = tk.Frame(self,bg=GREEN,width=205)
+        self.sidebar = tk.Frame(self,bg=GREEN,width=245)
         self.sidebar.pack(side='left',fill='y'); self.sidebar.pack_propagate(False)
         tk.Label(self.sidebar,text='▤  Finance Ledger',fg='white',bg=GREEN,font=('Segoe UI',17,'bold'),anchor='w').pack(fill='x',padx=18,pady=(28,3))
-        tk.Label(self.sidebar,text='YOUR BUSINESS, IN BALANCE',fg='#b8d3c8',bg=GREEN,font=('Segoe UI',8),anchor='w').pack(fill='x',padx=18,pady=(0,28))
+        tk.Label(self.sidebar,text='SINGLE ENTRY · CATEGORY REPORTS',fg='#b8d3c8',bg=GREEN,font=('Segoe UI',8),anchor='w').pack(fill='x',padx=18,pady=(0,16))
         self.nav = {}
         for page in self.PAGES:
             button = ttk.Button(self.sidebar,text=page,style='Nav.TButton',cursor='hand2',command=lambda page=page:self.show(page))
             button.pack(fill='x',padx=10,pady=2); self.nav[page]=button
         tk.Label(self.sidebar,text='●  OFFLINE  ·  SINGLE DEVICE\n\nINR / Asia/Kolkata\nv'+__version__,justify='left',fg='#b8d3c8',bg=GREEN,font=('Segoe UI',9),anchor='w').pack(side='bottom',fill='x',padx=20,pady=25)
+        tk.Label(self.sidebar,text='CATEGORY REPORTS',fg='#b8d3c8',bg=GREEN,font=('Segoe UI',9,'bold'),anchor='w').pack(fill='x',padx=20,pady=(18,6))
+        report_menu=tk.Frame(self.sidebar,bg=GREEN); report_menu.pack(fill='both',expand=True,padx=10)
+        self.report_nav=ttk.Treeview(report_menu,show='tree',height=5,style='ReportNav.Treeview',selectmode='browse')
+        self.report_nav.column('#0',width=210,minwidth=140,stretch=True)
+        scroll=ttk.Scrollbar(report_menu,orient='vertical',command=self.report_nav.yview)
+        self.report_nav.configure(yscrollcommand=scroll.set)
+        scroll.pack(side='right',fill='y'); self.report_nav.pack(fill='both',expand=True)
+        for key,label in TRANSACTION_DETAILS.items(): self.report_nav.insert('', 'end',iid=key,text=label)
+        self.report_nav.bind('<<TreeviewSelect>>',self.open_category_report)
         self.main = ttk.Frame(self,padding=(28,22)); self.main.pack(side='left',fill='both',expand=True)
         if demo:
             ttk.Label(self.main,text='DEMO WORKSPACE  ·  Sample records are stored separately from your real business.',background='#fff0c8',foreground='#806022',padding=10).pack(fill='x',pady=(0,12))
         header = ttk.Frame(self.main); header.pack(fill='x',pady=(0,20))
         self.heading = ttk.Label(header,text='Dashboard',style='Title.TLabel'); self.heading.pack(side='left')
-        ttk.Button(header,text='+  Add Transaction',style='Primary.TButton',command=self.transaction_form).pack(side='right')
+        ttk.Button(header,text='+  Add Cash Book Entry',style='Primary.TButton',command=self.transaction_form).pack(side='right')
         self.status = ttk.Label(self.main,text='',style='Muted.TLabel'); self.status.pack(side='bottom',fill='x',pady=(12,0))
         self.content = ttk.Frame(self.main); self.content.pack(fill='both',expand=True)
         self.bind('<Control-n>',lambda e:self.transaction_form()); self.bind('<F5>',lambda e:self.show(self.page))
@@ -215,6 +237,8 @@ class Application(tk.Tk):
         style.configure('Treeview',rowheight=34,background='white',fieldbackground='white',borderwidth=0,font=('Segoe UI',10))
         style.configure('Treeview.Heading',font=('Segoe UI',9,'bold'),padding=10,background='#e5ede8',foreground=MUTED)
         style.map('Treeview',background=[('selected',GREEN)],foreground=[('selected','white')])
+        style.configure('ReportNav.Treeview',rowheight=29,background=GREEN,fieldbackground=GREEN,foreground='#e4eee9',font=('Segoe UI',9),borderwidth=0)
+        style.map('ReportNav.Treeview',background=[('selected','#32725f')],foreground=[('selected','white')])
 
     def close(self):
         self.db.close(); self.destroy()
@@ -230,8 +254,14 @@ class Application(tk.Tk):
         for name,button in self.nav.items(): button.configure(style='NavActive.TButton' if name==page else 'Nav.TButton')
         self.heading.configure(text=page)
         self.status.configure(text=f'{self.business_name()}   ·   {"Demo" if self.demo else "Local records"}   ·   Ctrl+N: transaction   ·   F5: refresh')
-        render = {'Dashboard':self.dashboard,'Parties':self.parties_page,'Cash & Bank':self.cash_page,'Transactions':self.transactions_page,'Reports':self.reports_page,'Settings':self.settings_page}.get(page)
-        self.guard(render if render else self.finance_page)
+        render = {'Dashboard':self.dashboard,'Parties':self.parties_page,'Cash & Bank':self.cash_page,'Cash Book':self.transactions_page,'Reports':self.reports_page,'Settings':self.settings_page}[page]
+        self.guard(render)
+
+    def open_category_report(self,event=None):
+        selected=self.report_nav.selection()
+        if selected:
+            self.active_report=CATEGORY_REPORTS[selected[0]]
+            self.show('Reports')
 
     def business_name(self):
         return self.db.one("SELECT value FROM settings WHERE key='business_name'")['value']
@@ -297,11 +327,13 @@ class Application(tk.Tk):
         return [(a['id'],f'{a["id"]} · {a["name"]}') for a in self.ledger.cash_accounts()]
 
     def parties_page(self):
-        self.toolbar('Double-click a party for linked accounts, principal totals and transaction history.',[('+ Add Party',self.party_form)])
+        self.toolbar('Names are created in the single Cash Book Entry form. Double-click for accounts and statements.',[('+ Entry for new party',self.party_form)])
         parties = self.ledger.parties()
         table(self.content,['Name','Phone','Roles','Email','Status'],[[p['name'],p['phone'],p['roles'],p['email'],'Active' if p['active'] else 'Inactive'] for p in parties],on_open=lambda iid:self.party_detail(int(iid)),identifiers=[p['id'] for p in parties])
 
     def party_form(self,party_id=None):
+        if party_id is None:
+            return self.transaction_form(new_party=True)
         p = self.db.one('SELECT * FROM parties WHERE id=?',(party_id,)) or {}
         def save(form):
             values=form.values(); values['active']=values['active']=='Active'
@@ -325,28 +357,9 @@ class Application(tk.Tk):
         report=build_report(self.ledger,'Party statement',self.start,self.end,party_id=party_id)
         self.report_widget(history,report)
 
-    def finance_page(self):
-        modules={'Fixed Deposits':{'fd'},'Loans':{'loan'},'Other Finance':{'other'},'Hand Loans':{'hand_given','hand_taken'}}[self.page]
-        self.toolbar('Opening principal is a brought-forward balance only. Use Add Transaction for new money received or paid.',[('+ Open account',lambda:self.finance_form(next(iter(sorted(modules)))))])
-        accounts=[a for a in self.ledger.finance_accounts() if a['module'] in modules]
-        table(self.content,['Reference','Party','Module','Start date','Rate % p.a.','Due / maturity','Status','Principal outstanding'],[[a['reference'],a['party_name'],MODULES[a['module']],a['start_date'],a['annual_rate'],a['due_date'] or '—',a['status'].title(),self.ledger.principal(a['id'],today())] for a in accounts],{7},on_open=lambda iid:self.finance_detail(int(iid)),identifiers=[a['id'] for a in accounts])
-
     def finance_form(self,module):
-        def save(form):
-            v=form.values()
-            selected_module=next(key for key,label in MODULES.items() if label==v['module'])
-            self.ledger.add_finance(v['reference'],form.fields['party'].selected(True),selected_module,v['start_date'],paise(v['opening']),v['rate'],v['frequency'],v['due_date'] or None,v['notes'])
-            self.show(self.page)
-        form=Form(self,'Open Finance Account',save,help_text='Record the agreed terms. Opening principal does not create cash movement. For a new deposit or disbursement, leave opening principal at zero and post a transaction.')
-        form.add('module','Module / direction *',MODULES[module],choices=list(MODULES.values()))
-        form.add('reference','Unique reference *')
-        form.add('party','Party *',None,choices=self.party_choices(),search=True)
-        form.add('start_date','Opening / start date *',today())
-        form.add('opening','Brought-forward principal (₹)','0.00')
-        form.add('rate','Annual simple interest rate %','0')
-        form.add('frequency','Interest payout frequency','Monthly',choices=['Monthly','Quarterly','Half-yearly','Yearly','At maturity','On demand','Interest-free'])
-        form.add('due_date','Due / maturity date (optional)')
-        form.add('notes','Notes')
+        initial={'fd':'fd_received','loan':'loan_disbursed','other':'other_received','hand_given':'hand_given_disbursed','hand_taken':'hand_taken_received'}[module]
+        return self.transaction_form(initial,new_finance=True)
 
     def finance_detail(self,account_id):
         a=self.db.one('SELECT f.*,p.name party_name FROM finance_accounts f JOIN parties p ON p.id=f.party_id WHERE f.id=?',(account_id,))
@@ -397,55 +410,142 @@ class Application(tk.Tk):
         body=ttk.Frame(window,padding=20); body.pack(fill='both',expand=True)
         self.report_widget(body,build_report(self.ledger,'Cash book / Bank ledger',self.start,self.end,cash_id=cash_id))
 
-    def transaction_form(self,initial=None):
+    def transaction_form(self,initial=None,new_party=False,new_finance=False):
         if not self.ledger.cash_accounts():
-            messagebox.showinfo('Add a payment account','Add a Cash or Bank account before posting a transaction.',parent=self); self.cash_form(); return
+            messagebox.showinfo('Add a payment account','Add a Cash or Bank account before entering money received or paid.',parent=self)
+            self.cash_form(); return
         key=str(uuid.uuid4())
-        options={k:spec.label for k,spec in TYPES.items() if k!='transfer_in'}
-        options['transfer_out']='Internal transfer between Cash / Bank'
+        options=TRANSACTION_DETAILS
+        finance_accounts={a['id']:a for a in self.ledger.finance_accounts()}
+        initial=initial or 'loan_disbursed'
         def save(form):
-            v=form.values(); type_key=next(k for k,label in options.items() if label==v['type'])
+            v=form.values()
+            type_key=next(k for k,label in options.items() if label==v['type'])
             spec=TYPES[type_key]
-            account=form.fields['finance'].selected(bool(spec.module)) if spec.module else None
-            party=form.fields['party'].selected() if not spec.module and type_key!='transfer_out' else None
-            category=form.fields['category'].selected(True) if type_key.startswith('general') else None
-            target=form.fields['target'].selected(True) if type_key=='transfer_out' else None
-            parts=[(type_key,paise(v['amount']))]
-            if type_key=='loan_repaid' and paise(v['interest'])>0: parts.append(('loan_interest',paise(v['interest'])))
-            if paise(v['interest'])<0: raise ValueError('Split interest cannot be negative.')
-            self.ledger.post(tx_date=v['date'],components=parts,cash_id=form.fields['cash'].selected(True),idempotency_key=key,party_id=party,finance_id=account,category_id=category,method=v['method'],external_ref=v['external'],notes=v['notes'],transfer_to=target)
+            transfer=type_key=='transfer_out'
+            creating_account=bool(spec.module and v['finance_mode']=='Create new account')
+            creating_party=not transfer and v['party_mode']=='Create new party'
+            finance_id=form.fields['finance'].selected(True) if spec.module and not creating_account else None
+            party_id=None
+            if not transfer and not creating_party and v['party_mode']=='Existing party':
+                party_id=form.fields['party'].selected(required=creating_account)
+            party_values=None
+            if creating_party:
+                party_values={k:v['party_'+k] for k in ('name','phone','address','email')}
+                party_values['roles']=MODULES.get(spec.module,'General party')
+            terms=None
+            if creating_account:
+                terms=dict(reference=v['account_reference'],start_date=v['account_date'],opening_paise=paise(v['opening']),annual_rate=v['rate'],frequency=v['frequency'],due_date=v['due_date'] or None)
+            self.ledger.post_cashbook(type_key=type_key,amount_paise=paise(v['amount']),tx_date=v['date'],
+                cash_id=form.fields['cash'].selected(True),idempotency_key=key,party_id=party_id,
+                finance_id=finance_id,new_party=party_values,new_finance=terms,particulars=v['particulars'],
+                interest_paise=paise(v['interest']) if type_key=='loan_repaid' else 0,
+                method=v['method'],external_ref=v['external'],notes=v['notes'],
+                transfer_to=form.fields['target'].selected(True) if transfer else None)
             self.show(self.page)
-        form=Form(self,'Add Transaction',save,button='Post transaction',help_text='Direction is determined by the explicit transaction type. Tab moves between fields. Type in selectors to narrow results. Required fields are marked *.')
-        type_widget=form.add('type','Transaction type *',options[initial or 'loan_repaid'],choices=list(options.values()))
+        form=Form(self,'Cash Book Entry',save,button='Save entry',help_text='One form for every transaction. Category is the Transaction Details from your cash book. Cash In / Cash Out are automatic. New names and accounts are saved together with this entry.')
+        type_widget=form.add('type','Category / Transaction Details *',options[initial],choices=list(options.values()))
         direction=form.note('')
-        form.add('date','Transaction date *',today())
-        finance=form.add('finance','Finance account',None,choices=self.finance_choices(),search=True)
-        party=form.add('party','Party (general entry only)',None,choices=self.party_choices(),search=True)
-        categories=self.db.all('SELECT * FROM categories ORDER BY name')
-        category=form.add('category','Category (general entry)',None,choices=[(c['id'],f'{c["name"]} ({c["kind"]})') for c in categories],search=True)
-        amount=form.add('amount','Amount / principal (₹) *','')
-        interest=form.add('interest','Additional loan interest (₹)','0.00')
-        cash=form.add('cash','Cash / Bank account *',self.ledger.cash_accounts()[0]['id'],choices=self.cash_choices(),search=True)
-        target=form.add('target','Transfer destination',None,choices=self.cash_choices(),search=True)
+        form.add('date','Date *',today())
+        party_mode=form.add('party_mode','Name / party','Create new party' if new_party else 'Existing party',choices=['Existing party','Create new party','No party (particulars only)'])
+        party=form.add('party','Existing name',None,choices=self.party_choices(),search=True)
+        form.add('party_name','New name *')
+        form.add('party_phone','Phone (optional)')
+        form.add('party_address','Address (optional)')
+        form.add('party_email','Email (optional)')
+        finance_mode=form.add('finance_mode','Finance account','Create new account' if new_finance or new_party else 'Existing account',choices=['Existing account','Create new account'])
+        finance=form.add('finance','Existing FD / loan account',None,choices=self.finance_choices(),search=True)
+        form.add('account_reference','New account reference (or auto)')
+        form.add('account_date','Account opening date',today())
+        form.add('opening','Brought-forward principal (₹)','0.00')
+        form.add('rate','Annual interest rate %','0')
+        form.add('frequency','Interest payout frequency','Monthly',choices=['Monthly','Quarterly','Half-yearly','Yearly','At maturity','On demand','Interest-free'])
+        form.add('due_date','Due / maturity date (optional)')
+        form.add('particulars','Particulars / Description')
+        form.add('amount','Amount / principal (₹) *')
+        form.add('interest','Additional STL interest (₹)','0.00')
+        form.add('cash','Cash / Bank account *',next((a['id'] for a in self.ledger.cash_accounts() if a['kind']=='cash'),self.ledger.cash_accounts()[0]['id']),choices=self.cash_choices(),search=True)
+        form.add('target','Transfer destination *',None,choices=self.cash_choices(),search=True)
         form.add('method','Payment method *','cash',choices=list(METHODS))
-        form.add('external','External reference'); form.add('notes','Notes')
-        def changed(event=None):
-            selected=next(k for k,label in options.items() if label==type_widget.get()); spec=TYPES[selected]
-            direction.configure(text='Linked Amount Out + Amount In · excluded from overall movement totals' if selected=='transfer_out' else ('Amount In · money received' if spec.direction==1 else 'Amount Out · money paid'))
-            finance.configure(state='normal' if spec.module else 'disabled'); finance.set('')
-            finance.choices=self.finance_choices(spec.module) if spec.module else []; finance.labels=[label for _,label in finance.choices]; finance.configure(values=finance.labels)
-            party.configure(state='normal' if not spec.module and selected!='transfer_out' else 'disabled'); party.set('')
-            category.configure(state='normal' if selected.startswith('general') else 'disabled'); category.set('')
-            interest.configure(state='normal'); interest.delete(0,'end'); interest.insert(0,'0.00'); interest.configure(state='normal' if selected=='loan_repaid' else 'disabled')
-            target.configure(state='normal' if selected=='transfer_out' else 'disabled'); target.set('')
-        type_widget.bind('<<ComboboxSelected>>',changed); changed()
+        form.add('external','External reference')
+        form.add('notes','Notes')
+        account_note=form.note('')
+        party_keys=['party_name','party_phone','party_address','party_email']
+        account_keys=['account_reference','account_date','opening','rate','frequency','due_date']
+        def selected_type():
+            return next(k for k,label in options.items() if label==type_widget.get())
+        def refresh_choices():
+            spec=TYPES[selected_type()]
+            previous=next((key for key,label in finance.choices if label==finance.get()),None)
+            party_id=next((key for key,label in party.choices if label==party.get()),None) if party_mode.get()=='Existing party' else None
+            choices=[(a['id'],f'{a["reference"]} · {a["party_name"]}') for a in finance_accounts.values() if a['module']==spec.module and a['status']!='closed' and (not party_id or a['party_id']==party_id)]
+            finance.choices=choices; finance.labels=[label for _,label in choices]; finance.configure(values=finance.labels)
+            if previous in {key for key,_ in choices}: finance.select_key(previous)
+            elif len(choices)==1: finance.select_key(choices[0][0])
+            else: finance.set('')
+            if finance_mode.get()=='Existing account' and party_mode.get()=='Existing party' and not party.get():
+                account_id=next((key for key,label in choices if label==finance.get()),None)
+                if account_id: party.select_key(finance_accounts[account_id]['party_id'])
+        form.last_date=today()
+        def update(event=None):
+            entered_date=form.fields['date'].get()
+            if entered_date!=form.last_date and form.fields['account_date'].get()==form.last_date:
+                form.fields['account_date'].delete(0,'end'); form.fields['account_date'].insert(0,entered_date)
+            form.last_date=entered_date
+            type_key=selected_type(); spec=TYPES[type_key]; transfer=type_key=='transfer_out'
+            if spec.module and party_mode.get()=='No party (particulars only)': party_mode.set('Existing party')
+            if spec.module and party_mode.get()=='Create new party': finance_mode.set('Create new account')
+            creating_party=party_mode.get()=='Create new party' and not transfer
+            creating_account=bool(spec.module and finance_mode.get()=='Create new account')
+            form.visible(['party_mode'],not transfer)
+            form.visible(['party'],not transfer and party_mode.get()=='Existing party')
+            form.visible(party_keys,creating_party)
+            form.visible(['finance_mode'],bool(spec.module))
+            form.visible(['finance'],bool(spec.module) and not creating_account)
+            form.visible(account_keys,creating_account)
+            form.visible(['interest'],type_key=='loan_repaid')
+            form.visible(['target'],transfer)
+            refresh_choices()
+            account_id=next((key for key,label in finance.choices if label==finance.get()),None)
+            if transfer:
+                direction.configure(text='Internal transfer: linked Cash Out + Cash In, excluded from overall totals.')
+                account_note.configure(text='Choose two different Cash / Bank accounts. No party or finance account is linked.')
+            else:
+                direction.configure(text=('CASH IN / AMOUNT IN — money received' if spec.direction==1 else 'CASH OUT / AMOUNT OUT — money paid')+' · '+TYPES[type_key].label)
+                if creating_account:
+                    account_note.configure(text='Opening principal is only for an existing balance, never a new cash receipt. Leave it at zero for a new deposit/disbursement. The account and entry save atomically.')
+                elif account_id and spec.module:
+                    outstanding=self.ledger.principal(account_id,form.fields['date'].get()) if self._is_date(form.fields['date'].get()) else 0
+                    account_note.configure(text=f'Principal outstanding on the entered date: {money(outstanding)}. Interest is recorded separately.')
+                else:
+                    account_note.configure(text='For office expenses, use Particulars for Water Can, Salary, Rent, etc. Party/Name is optional.' if not spec.module else 'Select an existing account, or create a new one here. No separate account-opening screen is needed.')
+            form.fit()
+        def account_changed(event=None):
+            account_id=next((key for key,label in finance.choices if label==finance.get()),None)
+            if account_id:
+                party_mode.set('Existing party'); party.select_key(finance_accounts[account_id]['party_id'])
+            update()
+        type_widget.bind('<<ComboboxSelected>>',update)
+        party_mode.bind('<<ComboboxSelected>>',update)
+        party.bind('<<ComboboxSelected>>',update)
+        finance_mode.bind('<<ComboboxSelected>>',update)
+        finance.bind('<<ComboboxSelected>>',account_changed)
+        form.fields['date'].bind('<FocusOut>',update)
+        if not any(a['module']==TYPES[initial].module and a['status']!='closed' for a in finance_accounts.values()): finance_mode.set('Create new account')
+        update()
+        return form
+
+    @staticmethod
+    def _is_date(value):
+        try: valid_date(value); return True
+        except ValueError: return False
 
     def transactions_page(self):
-        self.toolbar('Double-click a row for its audit details or to reverse every linked component.',[('Export filtered CSV',lambda:self.guard(self.export_transactions))])
-        self.date_bar(self.content,lambda:self.show('Transactions'))
+        self.toolbar('Cash balance follows date order across all categories. Double-click for audit or reversal.',[('Export filtered CSV',lambda:self.guard(self.export_transactions)),('Cash book report',self.open_cashbook_report)])
+        self.date_bar(self.content,lambda:self.show('Cash Book'))
         filters=ttk.Frame(self.content); filters.pack(fill='x',pady=(0,6))
         self.tx_search=ttk.Entry(filters,width=26); self.tx_search.pack(side='left',padx=(0,6)); self.tx_search.insert(0,'')
-        ttk.Label(filters,text='Search reference, party, notes, type',style='Muted.TLabel').pack(side='left')
+        ttk.Label(filters,text='Search name, particulars or reference',style='Muted.TLabel').pack(side='left')
         self.tx_min=ttk.Entry(filters,width=11); self.tx_min.pack(side='right',padx=4)
         ttk.Label(filters,text='Min ₹').pack(side='right')
         self.tx_max=ttk.Entry(filters,width=11); self.tx_max.pack(side='right',padx=4)
@@ -453,13 +553,13 @@ class Application(tk.Tk):
         selectors=ttk.Frame(self.content); selectors.pack(fill='x',pady=6)
         self.tx_cash=SearchCombo(selectors,[(None,'All payment accounts')]+self.cash_choices(),width=18); self.tx_cash.select_key(None); self.tx_cash.pack(side='left',padx=(0,6))
         self.tx_party=SearchCombo(selectors,[(None,'All parties')]+self.party_choices(),width=18); self.tx_party.select_key(None); self.tx_party.pack(side='left',padx=6)
-        self.tx_type=SearchCombo(selectors,[(None,'All types')]+[(k,s.label) for k,s in TYPES.items()],width=22); self.tx_type.select_key(None); self.tx_type.pack(side='left',padx=6)
+        self.tx_type=SearchCombo(selectors,[(None,'All categories')]+list(TRANSACTION_DETAILS.items()),width=22); self.tx_type.select_key(None); self.tx_type.pack(side='left',padx=6)
         cats=self.db.all('SELECT * FROM categories ORDER BY name')
-        self.tx_category=SearchCombo(selectors,[(None,'All categories')]+[(c['id'],c['name']) for c in cats],width=18); self.tx_category.select_key(None); self.tx_category.pack(side='left',padx=6)
+        self.tx_category=SearchCombo(selectors,[(None,'All income/expense headings')]+[(c['id'],c['name']) for c in cats],width=18); self.tx_category.select_key(None); self.tx_category.pack(side='left',padx=6)
         bar=ttk.Frame(self.content); bar.pack(fill='x',pady=8)
         ttk.Button(bar,text='Apply filters',command=lambda:self.guard(self.filter_transactions)).pack(side='left')
         ttk.Label(bar,text='Sort all filtered rows by',style='Muted.TLabel').pack(side='left',padx=(14,5))
-        self.tx_sort=ttk.Combobox(bar,values=['Newest first','Oldest first','Amount low to high','Amount high to low','Party','Reference'],state='readonly',width=19); self.tx_sort.set('Newest first'); self.tx_sort.pack(side='left')
+        self.tx_sort=ttk.Combobox(bar,values=['Newest first','Oldest first','Amount low to high','Amount high to low','Party','Reference'],state='readonly',width=19); self.tx_sort.set('Oldest first'); self.tx_sort.pack(side='left')
         self.tx_sort.bind('<<ComboboxSelected>>',lambda e:self.guard(self.filter_transactions))
         self.tx_info=ttk.Label(bar,text='',style='Muted.TLabel'); self.tx_info.pack(side='right')
         self.tx_body=ttk.Frame(self.content); self.tx_body.pack(fill='both',expand=True)
@@ -476,12 +576,13 @@ class Application(tk.Tk):
         minimum=paise(self.tx_min.get()) if self.tx_min.get().strip() else None
         maximum=paise(self.tx_max.get()) if self.tx_max.get().strip() else None
         if minimum is not None and maximum is not None and minimum>maximum: raise ValueError('Minimum amount exceeds maximum.')
-        self.tx_rows=[r for r in rows if (not term or term in ' '.join(str(r.get(k) or '') for k in ('reference','external_ref','party_name','finance_reference','notes','category_name')).casefold() or term in TYPES[r['type']].label.casefold()) and (minimum is None or r['amount_paise']>=minimum) and (maximum is None or r['amount_paise']<=maximum)]
+        self.tx_rows=[r for r in rows if (not term or term in ' '.join(str(r.get(k) or '') for k in ('reference','external_ref','party_name','finance_reference','notes','particulars','category_name')).casefold() or term in transaction_detail(r['type']).casefold() or term in TYPES[r['type']].label.casefold()) and (minimum is None or r['amount_paise']>=minimum) and (maximum is None or r['amount_paise']<=maximum)]
         sorting=self.tx_sort.get()
         if sorting in ('Newest first','Oldest first'): self.tx_rows.sort(key=lambda r:(r['tx_date'],r['created_at'],r['id']),reverse=sorting=='Newest first')
         elif sorting.startswith('Amount'): self.tx_rows.sort(key=lambda r:r['amount_paise'],reverse=sorting=='Amount high to low')
         elif sorting=='Party': self.tx_rows.sort(key=lambda r:(r['party_name'] or '').casefold())
         else: self.tx_rows.sort(key=lambda r:r['reference'])
+        _,_,self.tx_balances=cashbook_balances(self.ledger,self.start,self.end,self.tx_cash.selected())
         self.tx_page=0; self.render_transactions()
 
     def tx_move(self,delta):
@@ -490,12 +591,12 @@ class Application(tk.Tk):
     def render_transactions(self):
         for child in self.tx_body.winfo_children(): child.destroy()
         rows=self.tx_rows[self.tx_page*50:self.tx_page*50+50]
-        table(self.tx_body,['Date','Reference','Party / account','Transaction type','Amount In','Amount Out','Cash / Bank'],[[r['tx_date'],r['reference'],r['party_name'] or r['finance_reference'] or '',('Reversal: ' if r['factor']==-1 else '')+TYPES[r['type']].label,r['amount_paise']*r['factor'] if r['direction']==1 else 0,r['amount_paise']*r['factor'] if r['direction']==-1 else 0,r['cash_name']] for r in rows],{4,5},identifiers=[r['id'] for r in rows],on_open=lambda iid:self.transaction_detail(next(r['group_id'] for r in rows if r['id']==int(iid))))
+        table(self.tx_body,['S.No','Transaction Details / Category','Date','Name','Particulars','Cash In','Cash Out','Cash Balance'],[[self.tx_page*50+i+1,('Reversal: ' if r['factor']==-1 else '')+transaction_detail(r['type']),r['tx_date'],r['party_name'] or '',r['particulars'],r['amount_paise']*r['factor'] if r['direction']==1 else 0,r['amount_paise']*r['factor'] if r['direction']==-1 else 0,self.tx_balances.get(r['id'],'')] for i,r in enumerate(rows)],{5,6,7},identifiers=[r['id'] for r in rows],widths=[50,190,100,120,140,100,100,120],on_open=lambda iid:self.transaction_detail(next(r['group_id'] for r in rows if r['id']==int(iid))))
         self.tx_info.configure(text=f'{len(self.tx_rows)} entries · page {self.tx_page+1} / {max(1,(len(self.tx_rows)+49)//50)}')
 
     def export_transactions(self):
         self.filter_transactions()
-        report=Report('Filtered Transactions',f'{self.start} to {self.end}', ['Date','Reference','Party','Finance account','Type','Amount In','Amount Out','Cash / Bank','Method','External reference','Notes','Created by','Created at UTC','Reversal of'],[[r['tx_date'],r['reference'],r['party_name'] or '',r['finance_reference'] or '',TYPES[r['type']].label,r['amount_paise']*r['factor'] if r['direction']==1 else 0,r['amount_paise']*r['factor'] if r['direction']==-1 else 0,r['cash_name'],r['method'],r['external_ref'],r['notes'],r['created_by'],r['created_at'],r['reversal_of'] or ''] for r in self.tx_rows],{5,6})
+        report=Report('Filtered Cash Book',f'{self.start} to {self.end}', ['S.No','Transaction Details / Category','Date','Name','Particulars','Cash In','Cash Out','Cash Balance','Cash / Bank','Finance account','Reference','Method','External reference','Notes','Created by','Created at UTC','Reversal of'],[[i+1,transaction_detail(r['type']),r['tx_date'],r['party_name'] or '',r['particulars'],r['amount_paise']*r['factor'] if r['direction']==1 else 0,r['amount_paise']*r['factor'] if r['direction']==-1 else 0,self.tx_balances.get(r['id'],''),r['cash_name'],r['finance_reference'] or '',r['reference'],r['method'],r['external_ref'],r['notes'],r['created_by'],r['created_at'],r['reversal_of'] or ''] for i,r in enumerate(self.tx_rows)],{5,6,7},['Cash balance is actual chronological cash across the selected payment accounts, including entries hidden by category/search filters. It is not recomputed by sort order.'])
         self.save_report(report,'.csv')
 
     def transaction_detail(self,group_id):
@@ -504,7 +605,7 @@ class Application(tk.Tk):
         window=tk.Toplevel(self); window.title(group['reference']); window.geometry('1000x540')
         body=ttk.Frame(window,padding=20); body.pack(fill='both',expand=True)
         ttk.Label(body,text=group['reference'],style='Title.TLabel').pack(anchor='w')
-        ttk.Label(body,text=f'Date: {group["tx_date"]}   Method: {group["method"]}\nCreated by {group["created_by"]} at {group["created_at"]} (UTC)\nExternal reference: {group["external_ref"]}\nNotes: {group["notes"]}\nReversal of: {group["reversal_of"] or "—"}',wraplength=900).pack(anchor='w',pady=12)
+        ttk.Label(body,text=f'Date: {group["tx_date"]}   Method: {group["method"]}\nCreated by {group["created_by"]} at {group["created_at"]} (UTC)\nExternal reference: {group["external_ref"]}\nParticulars: {group["particulars"]}\nNotes: {group["notes"]}\nReversal of: {group["reversal_of"] or "—"}',wraplength=900).pack(anchor='w',pady=12)
         table(body,['Type','Finance account','Cash / Bank','Amount','Factor'],[[TYPES[r['type']].label,r['finance_reference'] or '',r['cash_name'],r['amount_paise'],r['factor']] for r in rows],{3},height=4)
         reversed_group=self.db.one('SELECT reference FROM posting_groups WHERE reversal_of=?',(group_id,))
         if reversed_group: ttk.Label(body,text='Reversed by '+reversed_group['reference'],foreground='#a23a30').pack(anchor='w',pady=10)
@@ -529,7 +630,7 @@ class Application(tk.Tk):
         self.toolbar('Historical balances are reconstructed at the selected end date. Exports are generated locally.')
         self.date_bar(self.content,lambda:self.show('Reports'))
         bar=ttk.Frame(self.content); bar.pack(fill='x',pady=6)
-        self.report_name=ttk.Combobox(bar,values=REPORT_NAMES,state='readonly',width=42); self.report_name.set(REPORT_NAMES[0]); self.report_name.pack(side='left')
+        self.report_name=ttk.Combobox(bar,values=REPORT_NAMES,state='readonly',width=42); self.report_name.set(self.active_report); self.report_name.pack(side='left')
         ttk.Button(bar,text='Generate report',command=lambda:self.guard(self.generate_report)).pack(side='left',padx=10)
         filters=ttk.Frame(self.content); filters.pack(fill='x',pady=6)
         self.report_party=SearchCombo(filters,[(None,'All parties')]+self.party_choices(),width=27); self.report_party.select_key(None); self.report_party.grid(row=0,column=0,padx=(0,6),pady=4,sticky='ew')
@@ -537,23 +638,38 @@ class Application(tk.Tk):
         self.report_cash=SearchCombo(filters,[(None,'All payment accounts')]+self.cash_choices(),width=27); self.report_cash.select_key(None); self.report_cash.grid(row=0,column=2,padx=6,pady=4,sticky='ew')
         self.report_module=SearchCombo(filters,[(None,'All modules')]+list(MODULES.items()),width=27); self.report_module.select_key(None); self.report_module.grid(row=1,column=0,padx=(0,6),pady=4,sticky='ew')
         self.report_status=SearchCombo(filters,[(None,'All statuses')]+[(s,s.title()) for s in ('active','matured','closed')],width=32); self.report_status.select_key(None); self.report_status.grid(row=1,column=1,padx=6,pady=4,sticky='ew')
-        self.report_type=SearchCombo(filters,[(None,'All transaction types')]+[(k,v.label) for k,v in TYPES.items()],width=27); self.report_type.select_key(None); self.report_type.grid(row=1,column=2,padx=6,pady=4,sticky='ew')
+        self.report_type=SearchCombo(filters,[(None,'All transaction categories')]+list(TRANSACTION_DETAILS.items()),width=27); self.report_type.select_key(None); self.report_type.grid(row=1,column=2,padx=6,pady=4,sticky='ew')
         for i in range(3): filters.columnconfigure(i,weight=1)
         self.report_body=ttk.Frame(self.content); self.report_body.pack(fill='both',expand=True,pady=10)
         self.generate_report()
 
+    def open_cashbook_report(self):
+        self.active_report=CASHBOOK_REPORT
+        self.show('Reports')
+
     def generate_report(self):
+        self.active_report=self.report_name.get()
+        category=next((key for key,label in CATEGORY_REPORTS.items() if label==self.active_report),None)
+        if category:
+            self.report_type.select_key(category); self.report_type.configure(state='disabled')
+        elif self.report_type.cget('state')=='disabled':
+            self.report_type.configure(state='normal'); self.report_type.select_key(None)
         report=build_report(self.ledger,self.report_name.get(),self.start,self.end,party_id=self.report_party.selected(),finance_id=self.report_finance.selected(),cash_id=self.report_cash.selected(),module=self.report_module.selected(),status=self.report_status.selected(),type=self.report_type.selected())
         for child in self.report_body.winfo_children(): child.destroy()
         self.report_widget(self.report_body,report)
 
     def report_widget(self,parent,report):
         header=ttk.Frame(parent); header.pack(fill='x')
-        ttk.Label(header,text=report.title,style='Section.TLabel').pack(side='left')
+        ttk.Label(header,text=report.title,style='Section.TLabel',wraplength=440).pack(side='left')
         for label,suffix in [('CSV','.csv'),('Excel','.xlsx'),('PDF / Print','.pdf')]:
             ttk.Button(header,text=label,command=lambda suffix=suffix:self.guard(lambda:self.save_report(report,suffix))).pack(side='right',padx=4)
         ttk.Label(parent,text=report.period,style='Muted.TLabel').pack(anchor='w',pady=6)
-        table(parent,report.columns,report.rows,report.money_columns)
+        def open_account(index):
+            if report.columns and report.columns[0]=='Account':
+                reference=report.rows[int(index)][0]
+                account=next((a for a in self.ledger.finance_accounts() if a['reference']==reference),None)
+                if account: self.finance_detail(account['id'])
+        table(parent,report.columns,report.rows,report.money_columns,on_open=open_account if report.columns and report.columns[0]=='Account' else None)
         notes=tk.Text(parent,height=4,wrap='word',font=('Segoe UI',9),bg=BG,fg=MUTED,relief='flat')
         notes.pack(fill='x',pady=(8,0)); notes.insert('1.0','\n'.join(report.notes)); notes.configure(state='disabled')
 
@@ -589,10 +705,10 @@ class Application(tk.Tk):
         actions=ttk.Frame(area); actions.pack(fill='x',pady=5)
         ttk.Button(actions,text='Backup Database…',command=lambda:self.guard(self.manual_backup)).pack(side='left')
         ttk.Button(actions,text='Restore Backup…',command=lambda:self.guard(self.restore_backup)).pack(side='left',padx=10)
-        ttk.Label(area,text='General income & expense categories',style='Section.TLabel').pack(anchor='w',pady=(24,8))
+        ttk.Label(area,text='General income & expense headings',style='Section.TLabel').pack(anchor='w',pady=(24,8))
         cats=self.db.all('SELECT * FROM categories ORDER BY name')
         ttk.Label(area,text=' · '.join(c['name']+' ('+c['kind']+')' for c in cats),wraplength=850).pack(anchor='w')
-        ttk.Button(area,text='+ Add category',command=self.category_form).pack(anchor='w',pady=10)
+        ttk.Button(area,text='+ Add income / expense heading',command=self.category_form).pack(anchor='w',pady=10)
         ttk.Label(area,text='Audit history',style='Section.TLabel').pack(anchor='w',pady=(15,5))
         ttk.Label(area,text='Posted records cannot be edited or deleted. Corrections use linked reversals and replacement postings.',style='Muted.TLabel').pack(anchor='w')
         ttk.Button(area,text='View audit history',command=self.audit_window).pack(anchor='w',pady=10)
@@ -600,8 +716,8 @@ class Application(tk.Tk):
     def category_form(self):
         def save(form):
             v=form.values(); self.ledger.add_category(v['name'],v['kind']); self.show(self.page)
-        form=Form(self,'Add Category',save)
-        form.add('name','Category name *'); form.add('kind','Kind','expense',choices=['income','expense'])
+        form=Form(self,'Add Income / Expense Heading',save)
+        form.add('name','Heading name *'); form.add('kind','Kind','expense',choices=['income','expense'])
 
     def manual_backup(self):
         folder=filedialog.askdirectory(parent=self,title='Choose backup folder or USB drive')

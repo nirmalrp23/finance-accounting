@@ -59,4 +59,7 @@ CREATE TRIGGER groups_no_update BEFORE UPDATE ON posting_groups BEGIN SELECT RAI
 CREATE TRIGGER groups_no_delete BEFORE DELETE ON posting_groups BEGIN SELECT RAISE(ABORT,'Posted transactions cannot be deleted.'); END;
 CREATE TRIGGER audit_no_update BEFORE UPDATE ON audit_log BEGIN SELECT RAISE(ABORT,'Audit history is immutable.'); END;
 CREATE TRIGGER audit_no_delete BEFORE DELETE ON audit_log BEGIN SELECT RAISE(ABORT,'Audit history cannot be deleted.'); END;
+'''), (2, '''
+ALTER TABLE posting_groups ADD COLUMN particulars TEXT NOT NULL DEFAULT '';
+ALTER TABLE posting_groups ADD COLUMN intake_fingerprint TEXT NOT NULL DEFAULT '';
 ''')]
