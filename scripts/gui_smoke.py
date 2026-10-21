@@ -93,7 +93,7 @@ def run():
             assert len({r['group_id'] for r in latest})==1
             # New depositor, new FD and receipt are created in this same form.
             form=app.transaction_form('fd_received',new_party=True,new_finance=True); app.update()
-            put(form,'party_name','GUI New Depositor')
+            put(form,'party','GUI New Depositor')
             put(form,'account_reference','FD-GUI-NEW')
             put(form,'date','2026-10-18'); put(form,'account_date','2026-10-18')
             put(form,'amount','-1'); put(form,'particulars','New FD deposit')

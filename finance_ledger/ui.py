@@ -541,7 +541,7 @@ class Application(tk.Tk):
             party_values=None
             if creating_party:
                 party_values={k:v['party_'+k] for k in ('name','phone','address','email')}
-                if v['party_mode']=='Existing party': party_values['name']=v['party']
+                party_values['name']=v['party'] if v['party_mode']=='Existing party' else (v['party_name'] or v['party'])
                 party_values['roles']=MODULES.get(spec.module,'General party')
                 if spec.module:
                     creating_account=True; finance_id=None
