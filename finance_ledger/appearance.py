@@ -36,6 +36,9 @@ def configure_theme(root):
     style.map('TButton',background=[('active','#dce8e0'),('disabled','#eef2ef')],foreground=[('disabled','#9aa99f')])
     style.configure('Primary.TButton',background=GREEN,foreground=WHITE,padding=(18,11))
     style.map('Primary.TButton',background=[('active','#115c48'),('disabled','#a3beb0')],foreground=[('disabled',WHITE)])
+    for name,bg,fg in [('QuickIn.TButton',GREEN,WHITE),('QuickOut.TButton','#bd433c',WHITE),('QuickInactive.TButton','#edf2f0',MUTED)]:
+        style.configure(name,background=bg,foreground=fg,padding=(18,12),font=(FONT,11,'bold'))
+        style.map(name,background=[('active',bg)],foreground=[('active',fg)])
     style.configure('Subtle.TButton',background=WHITE,foreground=MUTED,padding=(10,7))
     style.map('Subtle.TButton',background=[('active',PALE)],foreground=[('active',GREEN)])
     for name,bg,fg in [('Nav.TButton',NAV,'#a9c4b8'),('NavActive.TButton','#254b3e',WHITE)]:

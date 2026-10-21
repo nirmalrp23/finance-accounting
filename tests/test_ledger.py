@@ -149,7 +149,7 @@ class LedgerCase(unittest.TestCase):
         self.assertEqual(report.rows[-1][-1],50_000)
         report=build_report(self.l,'Cash book / Bank ledger','2026-01-01','2026-01-31',cash_id=self.cash)
         self.assertEqual(report.rows[-1][-1],10_000_000)
-        self.assertEqual(report.rows[-1][6],0)
+        self.assertEqual(report.rows[-1][4],0)
 
     def test_closed_account_and_explicit_reopen(self):
         account=self.accounts['loan']
@@ -232,14 +232,14 @@ class LedgerCase(unittest.TestCase):
         self.post('transfer_out',100_000,'2026-01-16',transfer_to=self.bank)
         report=build_report(self.l,'Overall Amount In / Amount Out','2026-01-01','2026-01-31')
         self.assertEqual(report.rows[-1][-1],13_520_000)
-        self.assertEqual(report.rows[-1][6:8],[5_550_000,2_030_000])
+        self.assertEqual(report.rows[-1][4:6],[5_550_000,2_030_000])
         monthly=build_report(self.l,'Monthly summary','2026-01-01','2026-02-28')
         self.assertEqual(monthly.rows[0][1:7],[0,10_000_000,5_550_000,2_030_000,3_520_000,13_520_000])
         self.assertEqual(monthly.rows[1][1],13_520_000)
         self.assertEqual(monthly.rows[1][6],13_520_000)
         report=build_report(self.l,'Overall Amount In / Amount Out','2026-01-01','2026-01-31',cash_id=self.bank)
         self.assertEqual(report.rows[-1][-1],100_000)
-        self.assertEqual(report.rows[-1][6:8],[0,0])
+        self.assertEqual(report.rows[-1][4:6],[0,0])
 
     def test_failed_restore_reinstates_pre_restore_records(self):
         self.post('fd_received',1000)

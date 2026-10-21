@@ -40,6 +40,10 @@ def run():
                 app.report_nav.event_generate('<<TreeviewSelect>>'); app.update()
                 assert app.page=='Reports'
                 assert app.report_name.get()==name
+                from finance_ledger.reports import build_report
+                compact=build_report(app.ledger,name,app.start,app.end)
+                assert compact.columns[:6]==['Date','Name','Place Name','Transaction Details','Amount In','Amount Out']
+                assert len(compact.columns)==7
                 assert app.report_type.selected() is None
                 assert str(app.report_type.cget('state'))=='disabled'
                 assert not forms(),'A report menu must not create an entry form'
@@ -55,91 +59,87 @@ def run():
                 assert forms(),'Expected an input form'
                 assert forms()[0].winfo_height()<=app.winfo_screenheight(),'Form does not fit screen'
                 close_popups()
-            # Common-entry details stay compact; creation controls reveal fields in place.
+            # Only five inputs exist. Name is a plain Entry, with no selectors or hidden advanced controls.
             form=app.transaction_form(); app.update()
-            def find_button(widget,phrase):
-                for child in widget.winfo_children():
-                    if isinstance(child,ttk.Button) and phrase in child.cget('text'): return child
-                    found=find_button(child,phrase)
-                    if found: return found
-                return None
-            assert not form.fields['notes'].winfo_ismapped()
-            visible=[key for key,field in form.fields.items() if field.winfo_ismapped()]
-            assert visible==['party','place_name','amount','direction','type'],visible
-            form.fields['direction'].set('IN'); form.fields['direction'].event_generate('<<ComboboxSelected>>'); app.update()
+            assert list(form.fields)==['party','place_name','amount','direction','type']
+            assert type(form.fields['party']) is ttk.Entry
+            assert all(field.winfo_ismapped() for field in form.fields.values())
+            form.fields['direction'].buttons['IN'].invoke(); app.update()
+            assert form.fields['direction'].get()=='IN'
             assert 'STL LOAN DEBIT' not in form.fields['type'].cget('values')
             assert 'STL LOAN CREDIT' in form.fields['type'].cget('values')
-            form.fields['direction'].set('OUT'); form.fields['direction'].event_generate('<<ComboboxSelected>>'); app.update()
+            form.fields['direction'].buttons['OUT'].invoke(); app.update()
             assert 'STL LOAN CREDIT' not in form.fields['type'].cget('values')
-            toggle=find_button(form,'More details'); assert toggle is not None
-            toggle.invoke(); app.update(); assert form.fields['notes'].winfo_ismapped()
-            new_name=find_button(form,'+ New name'); assert new_name is not None
-            new_name.invoke(); app.update(); assert form.fields['party_name'].winfo_ismapped()
-            find_button(form,'Use existing name').invoke(); app.update()
-            assert not form.fields['party_name'].winfo_ismapped()
             close_popups()
-            # Failed save retains data, then the same form posts an atomic split.
+            # New name/account creation is automatic and atomic; invalid input retains all five values.
+            form=app.transaction_form('fd_received'); app.update()
+            put(form,'party','GUI New Depositor'); put(form,'place_name','Salem'); put(form,'amount','-1')
+            count=len(app.ledger.parties()); form.submit(); app.update()
+            assert forms() and len(app.ledger.parties())==count
+            assert form.fields['place_name'].get()=='Salem'
+            put(form,'amount','1000'); form.submit(); app.update(); assert not forms()
+            entry=next(r for r in app.ledger.entries() if r['party_name']=='GUI New Depositor')
+            assert entry['place_name']=='Salem' and entry['type']=='fd_received'
+            assert app.ledger.principal(entry['finance_id'])==100000
+            # An existing borrower is resolved from plain text, including case-insensitive matching.
             form=app.transaction_form('loan_repaid'); app.update()
-            put(form,'amount','100'); form.fields['finance'].set('')
-            form.submit()
-            assert form.winfo_exists() and form.fields['amount'].get()=='100'
-            assert form.error.cget('text')
-            put(form,'date','2026-10-18'); form.fields['finance'].select_key(2)
-            put(form,'interest','10'); put(form,'particulars','Split receipt')
-            form.submit(); app.update()
-            assert not forms(),'Successful entry should close the form'
-            latest=app.ledger.entries()[-2:]
-            assert {r['type'] for r in latest}=={'loan_repaid','loan_interest'}
-            assert len({r['group_id'] for r in latest})==1
-            # New depositor, new FD and receipt are created in this same form.
-            form=app.transaction_form('fd_received',new_party=True,new_finance=True); app.update()
-            put(form,'party','GUI New Depositor')
-            put(form,'account_reference','FD-GUI-NEW')
-            put(form,'date','2026-10-18'); put(form,'account_date','2026-10-18')
-            put(form,'amount','-1'); put(form,'particulars','New FD deposit')
+            put(form,'party','ravi kumar'); put(form,'amount','100'); form.submit(); app.update()
+            assert not forms(),'Existing principal receipt must save'
+            receipt=next(r for r in app.ledger.entries() if r['party_name']=='ravi kumar')
+            assert receipt['finance_id']==2 and receipt['type']=='loan_repaid'
+            form=app.transaction_form('loan_interest'); app.update()
+            put(form,'party','Ravi Kumar'); put(form,'amount','10'); form.submit(); app.update(); assert not forms()
+            # Expense Name is free text, with no fabricated party or finance account.
             count=len(app.ledger.parties())
-            form.submit(); app.update()
-            assert form.winfo_exists()
-            assert len(app.ledger.parties())==count
-            put(form,'amount','1000'); form.submit(); app.update()
-            assert not forms()
-            assert len(app.ledger.parties())==count+1
-            account=next(a for a in app.ledger.finance_accounts() if a['reference']=='FD-GUI-NEW')
-            assert app.ledger.principal(account['id'],'2026-10-31')==100000
-            # Office descriptions do not create parties or finance accounts.
             form=app.transaction_form('general_expense'); app.update()
-            put(form,'date','2026-10-18'); put(form,'amount','200'); put(form,'particulars','Water Can')
-            assert not form.fields['finance'].winfo_ismapped()
+            put(form,'party','Water Can'); put(form,'place_name','Chennai'); put(form,'amount','200')
             form.submit(); app.update(); assert not forms()
-            assert len(app.ledger.parties())==count+1
-            expense=app.ledger.entries()[-1]
-            assert expense['particulars']=='Water Can' and expense['party_id'] is None
+            assert len(app.ledger.parties())==count
+            expense=next(r for r in app.ledger.entries() if r['party_name']=='Water Can')
+            assert expense['party_id'] is None and expense['place_name']=='Chennai'
             app.show('Cash Book'); app.update()
             app.tx_search.insert(0,'Water Can'); app.filter_transactions()
             assert len(app.tx_rows)==1 and app.tx_rows[0]['type']=='general_expense'
-            app.toggle_transaction_filters(); app.update()
-            assert app.tx_min.winfo_ismapped()
+            app.clear_transactions(); app.tx_search.insert(0,'Chennai'); app.filter_transactions()
+            assert len(app.tx_rows)==1
+            app.toggle_transaction_filters(); app.update(); assert app.tx_min.winfo_ismapped()
             app.tx_sort.set('Amount high to low'); app.filter_transactions()
             assert expense['id'] in app.tx_balances
             app.clear_transactions(); app.update(); assert len(app.tx_rows)>1
-            for action in [lambda:app.party_detail(1),lambda:app.finance_detail(1),lambda:app.cash_detail(1),lambda:app.transaction_detail(latest[0]['group_id']),app.audit_window]:
+            for action in [lambda:app.party_detail(1),lambda:app.finance_detail(1),lambda:app.cash_detail(1),lambda:app.transaction_detail(receipt['group_id']),app.audit_window]:
                 action(); app.update(); close_popups()
-            # A typed new name and per-entry location work from the five primary fields.
-            form=app.transaction_form('loan_disbursed'); app.update()
-            put(form,'party','GUI Quick Name'); put(form,'place_name','Chennai'); put(form,'amount','50')
+            # Edit from the list, retain form data on failure, then post a linked correction.
+            app.show('Cash Book'); app.update()
+            app.tx_tree.selection_set(str(expense['id']))
+            form=app.edit_selected_entry(); app.update()
+            assert form.fields['party'].get()=='Water Can'
+            put(form,'party','Water Can Refill'); put(form,'amount','250')
+            before=len(app.ledger.entries()); cash_before=app.ledger.cash_balance(1)
             form.submit(); app.update()
-            assert not forms(),'Quick named entry must save without separate master forms'
-            quick=next(r for r in app.ledger.entries() if r['party_name']=='GUI Quick Name')
-            assert quick['place_name']=='Chennai' and quick['direction']==-1
+            assert forms() and len(app.ledger.entries())==before
+            assert form.fields['amount'].get()=='250' and 'reason' in form.error.cget('text')
+            put(form,'reason','Correct the bill amount'); form.submit(); app.update(); assert not forms()
+            replacement=next(r for r in app.ledger.entries() if r['party_name']=='Water Can Refill' and r['factor']==1)
+            assert replacement['amount_paise']==25000 and replacement['place_name']=='Chennai'
+            assert len(app.ledger.entries())==before+2
+            assert app.ledger.cash_balance(1)==cash_before-5000
+            app.transaction_detail(replacement['group_id']); app.update(); close_popups()
+            try: app.edit_entry_form(expense['group_id'])
+            except ValueError as exc: assert 'latest replacement' in str(exc)
+            else: raise AssertionError('An already replaced entry cannot be edited again')
+            # Transfers retain a dedicated linked-transfer form outside daily entry.
+            form=app.transfer_form(); app.update()
+            put(form,'amount','5'); form.fields['cash'].select_key(1); form.fields['target'].select_key(2)
+            form.submit(); app.update(); assert not forms()
             form=app.transaction_form('loan_disbursed'); app.update()
-            put(form,'amount','100'); form.fields['direction'].set('IN')
+            put(form,'party','Ravi Kumar'); put(form,'amount','100'); form.fields['direction'].set('IN')
             before=len(app.ledger.entries()); form.submit(); app.update()
             assert forms() and len(app.ledger.entries())==before
             assert 'matching IN/OUT' in form.error.cget('text')
             assert form.fields['amount'].get()=='100'
             close_popups()
             assert not errors,errors
-        print('GUI SMOKE PASSED: six pages, 8 combined report-only menus, unified form, atomic new party/account, split receipt, office particulars, search, audit.')
+        print('GUI SMOKE PASSED: six pages, eight reports, five-field text-name entry, direction buttons, automatic finance matching, free-text expenses, retention, audited editing, transfers and search.')
         app.close()
 
 

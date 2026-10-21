@@ -87,29 +87,28 @@ def build_cashbook_report(ledger, name, start, end, **filters):
         closing, balances, introductions = opening, {}, []
         balance_label = 'Category balance'
         notes.append('Opening/closing are cumulative net movements for the selected category/filters, not actual cash or principal outstanding. Use the complete Cash Book for actual cash and account statements for principal.')
-    rows = [['', 'Opening balance', start, '', '', 0, 0, opening, 0, '', '', '']]
-    balance, number = opening, 0
+    rows = [[start, '', '', 'Opening balance', 0, 0, opening]]
+    balance = opening
     events = [(r['tx_date'], r['created_at'], r['id'], r) for r in selected] + introductions
     for day, _, _, item in sorted(events, key=lambda e: e[:3]):
         if 'group_id' not in item:
             balance += item['opening_paise']
-            rows.append(['', 'Opening introduced (non-cash)', day, '', item['name'], 0, 0, balance, 0, item['name'], '', ''])
+            rows.append([day, '', '', 'Opening introduced (non-cash)', 0, 0, balance])
             continue
-        number += 1
         amount = item['amount_paise'] * item['factor']
         balance = balances[item['id']] if complete else balance + amount * item['direction']
-        rows.append([number, ('Reversal: ' if item['factor'] == -1 else '') + transaction_detail(item['type']), day,
-                     item['party_name'] or '', item['particulars'], amount if item['direction'] == 1 else 0,
-                     amount if item['direction'] == -1 else 0, balance,
-                     amount * item['direction'] if item['interest'] else 0, item['cash_name'], item['reference'], item['place_name']])
+        rows.append([day, item['party_name'] or item['particulars'], item['place_name'],
+                     ('Reversal: ' if item['factor'] == -1 else '') + transaction_detail(item['type']),
+                     amount if item['direction'] == 1 else 0, amount if item['direction'] == -1 else 0, balance])
     if not complete:
         closing = balance
-    rows.append(['', 'Closing / totals', end, '', '', sum(r[5] for r in rows), sum(r[6] for r in rows), closing, sum(r[8] for r in rows), '', '', ''])
+    rows.append([end, '', '', 'Closing / totals', sum(r[4] for r in rows), sum(r[5] for r in rows), closing])
+    interest_in=sum(r['amount_paise']*r['factor'] for r in selected if r['interest'] and r['direction']==1)
+    interest_out=sum(r['amount_paise']*r['factor'] for r in selected if r['interest'] and r['direction']==-1)
+    notes.append(f'Actual interest received: {money(interest_in)}. Actual interest paid: {money(interest_out)}. These amounts are included in Amount In / Amount Out. Interest and principal entries are identified separately in Transaction Details.')
     return Report(name, f'{start} to {end} · INR · Asia/Kolkata',
-                  ['S.No', 'Transaction Details / Category', 'Date', 'Name', 'Particulars / Description',
-                   'Cash In / Credit', 'Cash Out / Debit', balance_label, 'Interest (+In / -Out)',
-                   'Cash / Bank', 'Reference', 'Place Name'], rows, {5, 6, 7, 8},
-                  notes + ['Interest is already included in Cash In / Cash Out; do not add it again. Positive interest is income; negative interest is expense. Reversals use signed amounts in the original columns.'])
+                  ['Date', 'Name', 'Place Name', 'Transaction Details', 'Amount In', 'Amount Out', balance_label],
+                  rows, {4, 5, 6}, notes)
 
 
 def build_report(ledger, name, start, end, **filters):
@@ -165,7 +164,7 @@ def build_report(ledger, name, start, end, **filters):
         for day,_,r in sorted(events,key=lambda e:(e[0],e[1],e[2]['id'] if e[2] else 0)):
             if r is None:
                 balance += a['opening_paise']
-                rows.append([day,'','Opening principal introduced (non-cash)','',0,0,balance]); continue
+                rows.append([day,'','Opening principal introduced (non-cash)','',0,0,balance,'']); continue
             signed = r['amount_paise']*r['factor']
             balance += signed*r['principal_delta']
             rows.append([day,r['reference'],('Reversal: ' if r['factor']==-1 else '')+TYPES[r['type']].label,r['cash_name'],signed if r['direction']==1 else 0,signed if r['direction']==-1 else 0,balance])
@@ -238,16 +237,16 @@ def build_report(ledger, name, start, end, **filters):
         opening = sum(r['amount_paise']*r['direction']*r['factor'] for r in historic if not r['type'].startswith('transfer'))
         introductions = []
         notes.append('Running balance shows cumulative net movement for the selected report; it is not profit or principal outstanding.')
-    rows = [[start,'','Opening balance','','','',0,0,opening]]
+    rows = [[start,'','Opening balance','','','',0,0,opening,'']]
     balance = opening
     events = [(r['tx_date'],r['created_at'],r) for r in entries]+[(d,'',amount) for d,amount in introductions]
     for day,_,r in sorted(events,key=lambda e:(e[0],e[1],e[2]['id'] if isinstance(e[2],dict) else 0)):
         if isinstance(r,int):
-            balance += r; rows.append([day,'','Opening balance introduced (non-cash)','','','',0,0,balance]); continue
+            balance += r; rows.append([day,'','Opening balance introduced (non-cash)','','','',0,0,balance,'']); continue
         amount = r['amount_paise']*r['factor']
         balance += amount*r['direction']
-        rows.append([day,r['reference'],('Reversal: ' if r['factor']==-1 else '')+TYPES[r['type']].label,r['party_name'] or '',r['cash_name'],r['category_name'] or MODULES.get(r['module'],''),amount if r['direction']==1 else 0,amount if r['direction']==-1 else 0,balance])
-    rows.append([end,'','Closing / totals','','','',sum(r[6] for r in rows if 'Internal transfer' not in str(r[2]) or cash_ledger),sum(r[7] for r in rows if 'Internal transfer' not in str(r[2]) or cash_ledger),balance])
+        rows.append([day,r['reference'],('Reversal: ' if r['factor']==-1 else '')+TYPES[r['type']].label,r['party_name'] or r['particulars'],r['cash_name'],r['category_name'] or MODULES.get(r['module'],''),amount if r['direction']==1 else 0,amount if r['direction']==-1 else 0,balance,r['place_name']])
+    rows.append([end,'','Closing / totals','','','',sum(r[6] for r in rows if 'Internal transfer' not in str(r[2]) or cash_ledger),sum(r[7] for r in rows if 'Internal transfer' not in str(r[2]) or cash_ledger),balance,''])
     if name == 'Party statement':
         accounts = [a for a in ledger.finance_accounts() if a['party_id']==party_id and a['start_date']<=end]
         for a in accounts:
@@ -261,7 +260,8 @@ def build_report(ledger, name, start, end, **filters):
         for module in ('fd','other','hand_taken'):
             total = sum(r['amount_paise']*r['factor'] for r in entries if r['module']==module)
             notes.append(f'{MODULES[module]} actual interest paid: {money(total,"Rs ")}')
-    return Report(name,period,['Date','Reference','Transaction type','Party','Cash / Bank','Category','Amount In','Amount Out','Running balance'],rows,{6,7,8},notes)
+    return Report(name,period,['Date','Name','Place Name','Transaction Details','Amount In','Amount Out','Running balance'],
+                  [[r[i] for i in (0,3,9,2,6,7,8)] for r in rows],{4,5,6},notes)
 
 
 def safe_text(value):
@@ -333,16 +333,16 @@ def _export_report(report, path, business_name='Finance Ledger'):
             cell.font=Font(name='Calibri',size=11,color='FFFFFF',bold=True)
             cell.fill=PatternFill('solid',fgColor='164E45')
         sheet.row_dimensions[4].height=38
-        is_cashbook='S.No' in report.columns
+        is_cashbook='Transaction Details' in report.columns
         if is_cashbook:
             for number in (5,last_row):
                 for cell in sheet[number]:
                     cell.font=Font(name='Calibri',size=11,bold=True,color='164E45')
                     cell.fill=PatternFill('solid',fgColor='E8F0EB')
-        sheet.freeze_panes='F6' if is_cashbook else 'A5'
+        sheet.freeze_panes='E6' if is_cashbook else 'A5'
         sheet.auto_filter.ref=f'A4:{last_column}{max(4,last_row-1) if is_cashbook else last_row}'
         for i,column in enumerate(report.columns,1):
-            width=12 if column=='S.No' else 15 if column=='Date' else 36 if column in ('Transaction Details / Category','Particulars / Description') else 25 if column=='Name' else min(32,max(20,len(column)+2))
+            width=12 if column=='S.No' else 15 if column=='Date' else 36 if column in ('Transaction Details','Transaction Details / Category','Particulars / Description') else 25 if column=='Name' else min(32,max(20,len(column)+2))
             sheet.column_dimensions[get_column_letter(i)].width=width
         sheet.append([])
         for note in report.notes:
@@ -377,7 +377,7 @@ def _export_report(report, path, business_name='Finance Ledger'):
         data = [[para(c) for c in report.columns]]+[[para(c) for c in row] for row in report.display_rows('Rs ')]
         weights = [1.0]*len(report.columns)
         for i,column in enumerate(report.columns):
-            if column in ('Transaction type','Type','Party','Module','Category'): weights[i] = 1.7
+            if column in ('Transaction type','Transaction Details','Name','Place Name','Type','Party','Module','Category'): weights[i] = 1.7
         widths = [w/sum(weights)*(landscape(A4)[0]-48) for w in weights]
         table = LongTable(data,colWidths=widths,repeatRows=1,hAlign='LEFT')
         table.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.HexColor('#dcece6')),('ROWBACKGROUNDS',(0,1),(-1,-1),[colors.white,colors.HexColor('#f4f7f6')]),('VALIGN',(0,0),(-1,-1),'TOP'),('BOTTOMPADDING',(0,0),(-1,-1),7),('TOPPADDING',(0,0),(-1,-1),7),('LINEBELOW',(0,0),(-1,0),0.5,colors.HexColor('#79968c'))]))

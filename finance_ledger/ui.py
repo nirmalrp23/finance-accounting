@@ -4,6 +4,7 @@ import sqlite3
 import tkinter as tk
 import uuid
 from datetime import date, timedelta
+from decimal import Decimal
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from . import __version__
@@ -43,6 +44,27 @@ class SearchCombo(ttk.Combobox):
             if candidate == key:
                 self.set(label); return
         self.set('')
+
+
+class DirectionPicker(ttk.Frame):
+    """Two keyboard-accessible buttons with an explicit selected direction."""
+    def __init__(self,master,value):
+        super().__init__(master,style='Card.TFrame')
+        self.value=value; self.buttons={}
+        for index,(key,label) in enumerate((('IN','↓  IN'),('OUT','↑  OUT'))):
+            self.columnconfigure(index,weight=1)
+            button=ttk.Button(self,text=label,command=lambda key=key:self.choose(key))
+            button.grid(row=0,column=index,sticky='ew',padx=(0,8) if index==0 else (0,0))
+            self.buttons[key]=button
+        self.set(value)
+    def get(self): return self.value
+    def set(self,value):
+        self.value=value
+        for key,button in self.buttons.items():
+            button.configure(style=('QuickIn.TButton' if key=='IN' else 'QuickOut.TButton') if key==value else 'QuickInactive.TButton')
+    def choose(self,value):
+        self.set(value); self.event_generate('<<ComboboxSelected>>')
+    def focus_set(self): self.buttons[self.value].focus_set()
 
 
 class Form(tk.Toplevel):
@@ -119,7 +141,9 @@ class Form(tk.Toplevel):
         group=self.group
         frame=ttk.Frame(group['fields'],style='Card.TFrame')
         self.labels[key]=ttk.Label(frame,text=label,style='Field.TLabel'); self.labels[key].pack(anchor='w',pady=(0,6))
-        if search:
+        if key=='direction':
+            widget=DirectionPicker(frame,value)
+        elif search:
             widget=SearchCombo(frame,choices or [],width=18)
             if value is not None: widget.select_key(value)
         elif choices is not None:
@@ -511,173 +535,52 @@ class Application(tk.Tk):
         self.report_widget(body,build_report(self.ledger,'Cash book / Bank ledger',self.start,self.end,cash_id=cash_id))
 
     def transaction_form(self,initial=None,new_party=False,new_finance=False):
-        if not self.ledger.cash_accounts():
+        if initial=='transfer_out': return self.transfer_form()
+        cash_accounts=[a for a in self.ledger.cash_accounts() if a['active']]
+        if not cash_accounts:
             messagebox.showinfo('Add a payment account','Add a Cash or Bank account before entering money received or paid.',parent=self)
             self.cash_form(); return
-        key=str(uuid.uuid4())
-        options=TRANSACTION_DETAILS
-        finance_accounts={a['id']:a for a in self.ledger.finance_accounts()}
+        cash=next((a for a in cash_accounts if a['kind']=='cash'),cash_accounts[0])
+        entry_date=today(); submission_key=str(uuid.uuid4())
+        options={key:label for key,label in TRANSACTION_DETAILS.items() if key!='transfer_out'}
         initial=initial or 'loan_disbursed'
         def save(form):
-            v=form.values()
-            type_key=next(k for k,label in options.items() if label==v['type'])
-            spec=TYPES[type_key]
-            if v['direction'] != ('IN' if spec.direction==1 else 'OUT'):
-                raise ValueError('Choose Transaction details matching IN/OUT.')
-            transfer=type_key=='transfer_out'
-            creating_account=bool(spec.module and v['finance_mode']=='Create new account')
-            creating_party=not transfer and v['party_mode']=='Create new party'
-            finance_id=None
-            party_id=None
-            if not transfer and not creating_party and v['party_mode']=='Existing party':
-                name=v['party'].strip()
-                selected_id=next((key for key,label in party.choices if label==name),None)
-                matched=next((p for p in self.ledger.parties() if p['id']==selected_id or p['name'].casefold()==name.casefold()),None)
-                party_id=matched['id'] if matched else None
-                if name and not matched:
-                    creating_party=True
-                if creating_account and not name:
-                    raise ValueError('Enter Name before opening a finance account.')
-            party_values=None
-            if creating_party:
-                party_values={k:v['party_'+k] for k in ('name','phone','address','email')}
-                party_values['name']=v['party'] if v['party_mode']=='Existing party' else (v['party_name'] or v['party'])
-                party_values['roles']=MODULES.get(spec.module,'General party')
-                if spec.module:
-                    creating_account=True; finance_id=None
-            if spec.module and not creating_account:
-                finance_id=form.fields['finance'].selected(True)
-            terms=None
-            if creating_account:
-                terms=dict(reference=v['account_reference'],start_date=v['account_date'],opening_paise=paise(v['opening']),annual_rate=v['rate'],frequency=v['frequency'],due_date=v['due_date'] or None)
-            self.ledger.post_cashbook(type_key=type_key,amount_paise=paise(v['amount']),tx_date=v['date'],
-                cash_id=form.fields['cash'].selected(True),idempotency_key=key,party_id=party_id,
-                finance_id=finance_id,new_party=party_values,new_finance=terms,particulars=v['particulars'],place_name=v['place_name'],
-                interest_paise=paise(v['interest']) if type_key=='loan_repaid' else 0,
-                method=v['method'],external_ref=v['external'],notes=v['notes'],
-                transfer_to=form.fields['target'].selected(True) if transfer else None)
+            values=form.values()
+            type_key=next((key for key,label in options.items() if label==values['type']),None)
+            self.ledger.post_quick_entry(name=values['party'],place_name=values['place_name'],
+                amount_paise=paise(values['amount']),direction=values['direction'],type_key=type_key,
+                tx_date=entry_date,cash_id=cash['id'],idempotency_key=submission_key)
             self.show(self.page)
-        form=Form(self,'Cash Book Entry',save,button='Save entry',help_text='Enter a name, place and amount. Choose IN or OUT, then the transaction details. Date and payment settings are under More details.')
-        party=form.add('party','Name',None,choices=self.party_choices(),search=True)
+        form=Form(self,'New entry',save,button='Save entry',
+                  help_text=f'{date.fromisoformat(entry_date).strftime("%d %b %Y")}  ·  {cash["name"]}')
+        form.group['columns']=1
+        form.add('party','Name')
         form.add('place_name','Place Name')
         form.add('amount','Amount (₹) *')
-        direction_widget=form.add('direction','IN/OUT *','IN' if TYPES[initial].direction==1 else 'OUT',choices=['IN','OUT'])
-        type_widget=form.add('type','Transaction details *',options[initial],choices=[label for key,label in options.items() if TYPES[key].direction==TYPES[initial].direction])
-        party_section=form.section('More details',collapsible=True,expanded=new_party or new_finance)
-        form.error_group=party_section
-        form.add('date','Date *',today())
-        direction=ttk.Label(party_section['fields'],text='',style='CardMuted.TLabel',wraplength=790)
-        party_mode=form.add('party_mode','Name / party','Create new party' if new_party else 'Existing party',choices=['Existing party','Create new party','No party (particulars only)'])
-        form.add('party_name','New name *')
-        form.add('party_phone','Phone (optional)')
-        form.add('party_address','Address (optional)')
-        form.add('party_email','Email (optional)')
-        finance_mode=form.add('finance_mode','Finance account','Create new account' if new_finance or new_party else 'Existing account',choices=['Existing account','Create new account'])
-        finance=form.add('finance','Existing FD / loan account',None,choices=self.finance_choices(),search=True)
-        form.add('account_reference','New account reference (or auto)')
-        form.add('account_date','Account opening date',today())
-        form.add('opening','Brought-forward principal (₹)','0.00')
-        form.add('rate','Annual interest rate %','0')
-        form.add('frequency','Interest payout frequency','Monthly',choices=['Monthly','Quarterly','Half-yearly','Yearly','At maturity','On demand','Interest-free'])
-        form.add('due_date','Due / maturity date (optional)')
-        form.add('interest','Additional STL interest (₹)','0.00')
-        form.add('cash','Cash / Bank account *',next((a['id'] for a in self.ledger.cash_accounts() if a['kind']=='cash'),self.ledger.cash_accounts()[0]['id']),choices=self.cash_choices(),search=True)
-        form.add('method','Payment method *','cash',choices=list(METHODS))
-        form.add('target','Transfer destination *',None,choices=self.cash_choices(),search=True)
-        form.add('particulars','Particulars / Description')
-        account_note=ttk.Label(party_section['fields'],text='',style='CardMuted.TLabel',wraplength=790)
-        account_note.grid(row=100,column=0,columnspan=2,sticky='w',pady=(5,0))
-        form.add('external','External reference')
-        form.add('notes','Notes')
-        party_keys=['party_name','party_phone','party_address','party_email']
-        account_keys=['account_reference','account_date','opening','rate','frequency','due_date']
-        def direction_changed(event=None):
-            choices=[label for key,label in options.items() if ('IN' if TYPES[key].direction==1 else 'OUT')==direction_widget.get()]
-            type_widget.configure(values=choices)
-            if type_widget.get() not in choices: type_widget.set(choices[0])
-            update()
-        def selected_type():
-            return next(k for k,label in options.items() if label==type_widget.get())
-        def refresh_choices():
-            spec=TYPES[selected_type()]
-            previous=next((key for key,label in finance.choices if label==finance.get()),None)
-            party_id=next((key for key,label in party.choices if label==party.get()),None)
-            if party_id is None and party_mode.get()=='Existing party':
-                party_id=next((p['id'] for p in self.ledger.parties() if p['name'].casefold()==party.get().strip().casefold()),None)
-            choices=[(a['id'],f'{a["reference"]} · {a["party_name"]}') for a in finance_accounts.values() if a['module']==spec.module and a['status']!='closed' and (not party_id or a['party_id']==party_id)]
-            finance.choices=choices; finance.labels=[label for _,label in choices]; finance.configure(values=finance.labels)
-            if previous in {key for key,_ in choices}: finance.select_key(previous)
-            elif len(choices)==1: finance.select_key(choices[0][0])
-            else: finance.set('')
-            if finance_mode.get()=='Existing account' and party_mode.get()=='Existing party' and not party.get():
-                account_id=next((key for key,label in choices if label==finance.get()),None)
-                if account_id: party.select_key(finance_accounts[account_id]['party_id'])
-        form.last_date=today()
-        def update(event=None):
-            entered_date=form.fields['date'].get()
-            if entered_date!=form.last_date and form.fields['account_date'].get()==form.last_date:
-                form.fields['account_date'].delete(0,'end'); form.fields['account_date'].insert(0,entered_date)
-            form.last_date=entered_date
-            type_key=selected_type(); spec=TYPES[type_key]; transfer=type_key=='transfer_out'
-            if spec.module and party_mode.get()=='No party (particulars only)': party_mode.set('Existing party')
-            if spec.module and party_mode.get()=='Create new party': finance_mode.set('Create new account')
-            creating_party=party_mode.get()=='Create new party' and not transfer
-            creating_account=bool(spec.module and finance_mode.get()=='Create new account')
-            form.visible(['party_mode'],not transfer)
-            form.visible(['party'],True)
-            form.visible(party_keys,creating_party)
-            form.visible(['finance_mode'],bool(spec.module))
-            form.visible(['finance'],bool(spec.module) and not creating_account)
-            form.visible(account_keys,creating_account)
-            form.visible(['interest'],type_key=='loan_repaid')
-            form.visible(['target'],transfer)
-            form.visible(['party_mode','finance_mode'],False)
-            party_new.configure(text='Use existing name' if creating_party else '+ New name')
-            account_new.configure(text='Use existing account' if creating_account else '+ New account')
-            if transfer: party_new.pack_forget()
-            elif not party_new.winfo_manager(): party_new.pack(side='right',padx=(8,0))
-            if spec.module and not account_new.winfo_manager(): account_new.pack(side='right',padx=(8,0))
-            elif not spec.module: account_new.pack_forget()
-            refresh_choices()
-            account_id=next((key for key,label in finance.choices if label==finance.get()),None)
-            if transfer:
-                direction.configure(text='Internal transfer · Cash Out and Cash In are linked. Overall totals exclude transfers.',style='Info.TLabel')
-                account_note.configure(text='Choose two different Cash / Bank accounts. No party or finance account is linked.')
-            else:
-                direction.configure(text=('Cash In / Amount In  ·  ' if spec.direction==1 else 'Cash Out / Amount Out  ·  ')+TYPES[type_key].label,style='In.TLabel' if spec.direction==1 else 'Out.TLabel')
-                if creating_account:
-                    account_note.configure(text='Leave opening principal at zero for a new deposit or disbursement. Use brought-forward principal only for money already outstanding.')
-                elif account_id and spec.module:
-                    outstanding=self.ledger.principal(account_id,form.fields['date'].get()) if self._is_date(form.fields['date'].get()) else 0
-                    account_note.configure(text=f'Principal outstanding on the entered date: {money(outstanding)}. Interest is recorded separately.')
-                else:
-                    account_note.configure(text='For office expenses, use Particulars for Water Can, Salary, Rent, etc. Party/Name is optional.' if not spec.module else 'Select an existing account, or create a new one here. No separate account-opening screen is needed.')
-            form.fit()
-        def account_changed(event=None):
-            account_id=next((key for key,label in finance.choices if label==finance.get()),None)
-            if account_id:
-                party_mode.set('Existing party'); party.select_key(finance_accounts[account_id]['party_id'])
-            update()
-        def toggle_party():
-            party_mode.set('Existing party' if party_mode.get()=='Create new party' else 'Create new party'); update()
-        def toggle_account():
-            if finance_mode.get()=='Create new account':
-                finance_mode.set('Existing account')
-                if party_mode.get()=='Create new party': party_mode.set('Existing party')
-            else: finance_mode.set('Create new account')
-            update()
-        party_new=ttk.Button(party_section['heading'],text='+ New name',style='Subtle.TButton',command=toggle_party)
-        account_new=ttk.Button(party_section['heading'],text='+ New account',style='Subtle.TButton',command=toggle_account)
-        direction_widget.bind('<<ComboboxSelected>>',direction_changed)
-        type_widget.bind('<<ComboboxSelected>>',update)
-        party_mode.bind('<<ComboboxSelected>>',update)
-        party.bind('<<ComboboxSelected>>',update)
-        party.bind('<FocusOut>',lambda event: refresh_choices())
-        finance_mode.bind('<<ComboboxSelected>>',update)
-        finance.bind('<<ComboboxSelected>>',account_changed)
-        form.fields['date'].bind('<FocusOut>',update)
-        if not any(a['module']==TYPES[initial].module and a['status']!='closed' for a in finance_accounts.values()): finance_mode.set('Create new account')
-        update()
+        direction=form.add('direction','IN/OUT *','IN' if TYPES[initial].direction==1 else 'OUT',choices=['IN','OUT'])
+        details=form.add('type','Transaction details *',options[initial],choices=[])
+        def update_options(event=None):
+            choices=[label for key,label in options.items() if ('IN' if TYPES[key].direction==1 else 'OUT')==direction.get()]
+            details.configure(values=choices)
+            if details.get() not in choices: details.set(choices[0])
+        direction.bind('<<ComboboxSelected>>',update_options)
+        update_options(); form.fit()
+        form.minsize(520,480); form.geometry('640x640')
+        return form
+
+    def transfer_form(self):
+        def save(form):
+            values=form.values()
+            self.ledger.post_cashbook(type_key='transfer_out',amount_paise=paise(values['amount']),
+                tx_date=values['date'],cash_id=form.fields['cash'].selected(True),
+                transfer_to=form.fields['target'].selected(True),idempotency_key=key)
+            self.show(self.page)
+        key=str(uuid.uuid4())
+        form=Form(self,'Transfer between Cash & Bank',save,button='Save transfer',
+                  help_text='Move money between your payment accounts. The two linked entries leave total cash unchanged.')
+        form.add('amount','Amount (₹) *'); form.add('date','Date',today())
+        form.add('cash','From *',None,choices=self.cash_choices(),search=True)
+        form.add('target','To *',None,choices=self.cash_choices(),search=True)
         return form
 
     @staticmethod
@@ -718,6 +621,7 @@ class Application(tk.Tk):
         bar=ttk.Frame(self.content); bar.pack(fill='x',pady=(4,4))
         ttk.Label(bar,text='Entries',style='Section.TLabel').pack(side='left')
         self.tx_info=ttk.Label(bar,text='',style='Muted.TLabel'); self.tx_info.pack(side='left',padx=12)
+        ttk.Button(bar,text='Edit selected entry',command=lambda:self.guard(self.edit_selected_entry)).pack(side='right',padx=8)
         self.tx_sort=ttk.Combobox(bar,values=['Newest first','Oldest first','Amount low to high','Amount high to low','Party','Reference'],state='readonly',width=20); self.tx_sort.set('Oldest first'); self.tx_sort.pack(side='right')
         ttk.Label(bar,text='Sort by',style='Muted.TLabel').pack(side='right',padx=8)
         self.tx_sort.bind('<<ComboboxSelected>>',lambda e:self.guard(self.filter_transactions))
@@ -761,13 +665,58 @@ class Application(tk.Tk):
     def render_transactions(self):
         for child in self.tx_body.winfo_children(): child.destroy()
         rows=self.tx_rows[self.tx_page*50:self.tx_page*50+50]
-        table(self.tx_body,['S.No','Transaction Details / Category','Date','Name','Particulars','Cash In','Cash Out','Cash Balance','Place Name'],[[self.tx_page*50+i+1,('Reversal: ' if r['factor']==-1 else '')+transaction_detail(r['type']),r['tx_date'],r['party_name'] or '',r['particulars'],r['amount_paise']*r['factor'] if r['direction']==1 else 0,r['amount_paise']*r['factor'] if r['direction']==-1 else 0,self.tx_balances.get(r['id'],''),r['place_name']] for i,r in enumerate(rows)],{5,6,7},identifiers=[r['id'] for r in rows],widths=[50,190,100,120,140,100,100,120,130],on_open=lambda iid:self.transaction_detail(next(r['group_id'] for r in rows if r['id']==int(iid))))
+        self.tx_tree=table(self.tx_body,['Date','Name','Place Name','Transaction Details','Amount In','Amount Out','Cash balance'],[[r['tx_date'],r['party_name'] or r['particulars'],r['place_name'],('Reversal: ' if r['factor']==-1 else '')+transaction_detail(r['type']),r['amount_paise']*r['factor'] if r['direction']==1 else 0,r['amount_paise']*r['factor'] if r['direction']==-1 else 0,self.tx_balances.get(r['id'],'')] for r in rows],{4,5,6},identifiers=[r['id'] for r in rows],widths=[100,150,130,220,110,110,130],on_open=lambda iid:self.transaction_detail(next(r['group_id'] for r in rows if r['id']==int(iid))))
         self.tx_info.configure(text=f'{len(self.tx_rows)} entries · page {self.tx_page+1} / {max(1,(len(self.tx_rows)+49)//50)}')
 
     def export_transactions(self):
         self.filter_transactions()
-        report=Report('Filtered Cash Book',f'{self.start} to {self.end}', ['S.No','Transaction Details / Category','Date','Name','Particulars','Cash In','Cash Out','Cash Balance','Cash / Bank','Finance account','Reference','Method','External reference','Notes','Created by','Created at UTC','Reversal of','Place Name'],[[i+1,transaction_detail(r['type']),r['tx_date'],r['party_name'] or '',r['particulars'],r['amount_paise']*r['factor'] if r['direction']==1 else 0,r['amount_paise']*r['factor'] if r['direction']==-1 else 0,self.tx_balances.get(r['id'],''),r['cash_name'],r['finance_reference'] or '',r['reference'],r['method'],r['external_ref'],r['notes'],r['created_by'],r['created_at'],r['reversal_of'] or '',r['place_name']] for i,r in enumerate(self.tx_rows)],{5,6,7},['Cash balance is actual chronological cash across the selected payment accounts, including entries hidden by category/search filters. It is not recomputed by sort order.'])
+        report=Report('Filtered Cash Book',f'{self.start} to {self.end}', ['Date','Name','Place Name','Transaction Details','Amount In','Amount Out','Cash balance'],[[r['tx_date'],r['party_name'] or r['particulars'],r['place_name'],('Reversal: ' if r['factor']==-1 else '')+transaction_detail(r['type']),r['amount_paise']*r['factor'] if r['direction']==1 else 0,r['amount_paise']*r['factor'] if r['direction']==-1 else 0,self.tx_balances.get(r['id'],'')] for r in self.tx_rows],{4,5,6},['Cash balance is actual chronological cash across the selected payment accounts, including entries hidden by category/search filters. It is not recomputed by sort order.'])
         self.save_report(report,'.csv')
+
+    def edit_selected_entry(self):
+        selection=self.tx_tree.selection()
+        if not selection: raise ValueError('Select an entry to edit first.')
+        entry=next(r for r in self.tx_rows if r['id']==int(selection[0]))
+        return self.edit_entry_form(entry['group_id'])
+
+    def edit_entry_form(self,group_id,detail_window=None):
+        group=self.db.one('SELECT * FROM posting_groups WHERE id=?',(group_id,))
+        rows=[r for r in self.ledger.entries() if r['group_id']==group_id]
+        if not group or group['reversal_of'] or any(r['reversed_by'] for r in rows):
+            raise ValueError('This entry was already reversed or replaced. Open the latest replacement to edit it.')
+        main=next((r for r in rows if not r['interest'] and r['type']!='transfer_in'),rows[0])
+        transfer=main['type']=='transfer_out'
+        correction_date=max(today(),group['tx_date']); key=str(uuid.uuid4())
+        options={'transfer_out':TRANSACTION_DETAILS['transfer_out']} if transfer else {k:v for k,v in TRANSACTION_DETAILS.items() if k!='transfer_out'}
+        def save(form):
+            values=form.values(); type_key=next((k for k,v in options.items() if v==values['type']),None)
+            self.ledger.edit_entry(group_id,name=values['party'],place_name=values['place_name'],
+                amount_paise=paise(values['amount']),direction=values['direction'],type_key=type_key,
+                tx_date=correction_date,reason=values['reason'],idempotency_key=key,
+                interest_paise=paise(values['interest']) if 'interest' in values else 0,
+                transfer_to=form.fields['target'].selected(True) if transfer else None)
+            if detail_window and detail_window.winfo_exists(): detail_window.destroy()
+            self.show(self.page)
+        form=Form(self,'Edit entry',save,button='Save changes',
+                  help_text=f'Correction date: {correction_date}. The original stays in history; saving creates a linked reversal and replacement. Earlier reports stay unchanged.')
+        form.add('party','Name',main['party_name'] or main['particulars'])
+        form.add('place_name','Place Name',group['place_name'])
+        form.add('amount','Amount (₹) *',f"{Decimal(main['amount_paise'])/100:.2f}")
+        direction=form.add('direction','IN/OUT *','IN' if main['direction']==1 else 'OUT',choices=['IN','OUT'])
+        details=form.add('type','Transaction details *',transaction_detail(main['type']),choices=[])
+        if len(rows)==2 and not transfer:
+            interest=next(r for r in rows if r['interest'])
+            form.add('interest','Linked interest (₹)',f"{Decimal(interest['amount_paise'])/100:.2f}")
+        if transfer:
+            form.add('target','Transfer destination',next(r['cash_id'] for r in rows if r['type']=='transfer_in'),choices=self.cash_choices(),search=True)
+        form.add('reason','Reason for edit *')
+        def update_options(event=None):
+            choices=[v for k,v in options.items() if ('IN' if TYPES[k].direction==1 else 'OUT')==direction.get()]
+            details.configure(values=choices)
+            if details.get() not in choices: details.set(choices[0] if choices else '')
+        direction.bind('<<ComboboxSelected>>',update_options)
+        update_options(); form.fit()
+        return form
 
     def transaction_detail(self,group_id):
         group=self.db.one('SELECT * FROM posting_groups WHERE id=?',(group_id,))
@@ -777,9 +726,21 @@ class Application(tk.Tk):
         ttk.Label(body,text=group['reference'],style='Title.TLabel').pack(anchor='w')
         ttk.Label(body,text=f'Date: {group["tx_date"]}   Method: {group["method"]}\nCreated by {group["created_by"]} at {group["created_at"]} (UTC)\nExternal reference: {group["external_ref"]}\nPlace Name: {group["place_name"]}\nParticulars: {group["particulars"]}\nNotes: {group["notes"]}\nReversal of: {group["reversal_of"] or "—"}',wraplength=900).pack(anchor='w',pady=12)
         table(body,['Type','Finance account','Cash / Bank','Amount','Factor'],[[TYPES[r['type']].label,r['finance_reference'] or '',r['cash_name'],r['amount_paise'],r['factor']] for r in rows],{3},height=4)
+        edit_audits=self.db.all("SELECT entity_id,after_json FROM audit_log WHERE entity='transaction' AND action='edit' ORDER BY id")
+        current_edit=next((json.loads(a['after_json']) for a in edit_audits if a['entity_id']==group_id),None)
+        if current_edit:
+            original=self.db.one('SELECT reference FROM posting_groups WHERE id=?',(current_edit['original'],))
+            ttk.Button(body,text='View original '+original['reference'],command=lambda:self.transaction_detail(current_edit['original'])).pack(anchor='w')
+        edited_into=next((a['entity_id'] for a in edit_audits if json.loads(a['after_json']).get('original')==group_id),None)
+        if edited_into:
+            replacement=self.db.one('SELECT reference FROM posting_groups WHERE id=?',(edited_into,))
+            ttk.Button(body,text='View edited entry '+replacement['reference'],command=lambda:self.transaction_detail(edited_into)).pack(anchor='w')
         reversed_group=self.db.one('SELECT reference FROM posting_groups WHERE reversal_of=?',(group_id,))
         if reversed_group: ttk.Label(body,text='Reversed by '+reversed_group['reference'],foreground='#a23a30').pack(anchor='w',pady=10)
-        elif not group['reversal_of']: ttk.Button(body,text='Reverse all linked components…',command=lambda:self.reversal_form(group_id,window)).pack(anchor='e',pady=12)
+        elif not group['reversal_of']:
+            actions=ttk.Frame(body); actions.pack(fill='x',pady=12)
+            ttk.Button(actions,text='Edit entry',style='Primary.TButton',command=lambda:self.guard(lambda:self.edit_entry_form(group_id,window))).pack(side='right')
+            ttk.Button(actions,text='Reverse all linked components…',command=lambda:self.reversal_form(group_id,window)).pack(side='right',padx=8)
 
     def reversal_form(self,group_id,detail_window):
         key=str(uuid.uuid4())

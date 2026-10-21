@@ -64,4 +64,6 @@ ALTER TABLE posting_groups ADD COLUMN particulars TEXT NOT NULL DEFAULT '';
 ALTER TABLE posting_groups ADD COLUMN intake_fingerprint TEXT NOT NULL DEFAULT '';
 '''), (3, '''
 ALTER TABLE posting_groups ADD COLUMN place_name TEXT NOT NULL DEFAULT '';
+'''), (4, '''
+ALTER TABLE posting_groups ADD COLUMN entry_name TEXT NOT NULL DEFAULT '';
 ''')]
