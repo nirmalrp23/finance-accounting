@@ -369,8 +369,46 @@ class Ledger:
         spec = TYPES[type_key]
         self.db.conn.execute('INSERT INTO entries(group_id,cash_id,party_id,finance_id,category_id,type,amount_paise,direction,principal_delta,interest,factor) VALUES(?,?,?,?,?,?,?,?,?,?,?)', (group_id,cash_id,party_id,finance_id,category_id,type_key,amount,spec.direction,spec.principal,int(spec.interest),factor))
 
+    def current_entry(self, group_id):
+        """Follow immutable correction links, including selections of reversal rows."""
+        replacements={json.loads(a['after_json'])['original']:a['entity_id'] for a in self.db.all(
+            "SELECT entity_id,after_json FROM audit_log WHERE entity='transaction' AND action='edit' ORDER BY id")}
+        seen=set()
+        while group_id not in seen:
+            seen.add(group_id)
+            group=self.db.one('SELECT * FROM posting_groups WHERE id=?',(group_id,))
+            if not group: raise ValueError('Entry not found.')
+            if group['reversal_of']:
+                group_id=group['reversal_of']; continue
+            if group_id in replacements:
+                group_id=replacements[group_id]; continue
+            if self.db.one('SELECT id FROM posting_groups WHERE reversal_of=?',(group_id,)):
+                raise ValueError('This entry is deleted or reversed. Its audit history is preserved.')
+            return group
+        raise ValueError('Invalid entry correction history.')
+
+    def delete_entry(self, group_id, *, tx_date, reason, idempotency_key, expected_current=None):
+        """Delete the current financial effect through an audited reversal only."""
+        valid_date(tx_date)
+        if not reason.strip(): raise ValueError('Enter a reason for deleting this entry.')
+        request=dict(requested_original=group_id,tx_date=tx_date,reason=reason.strip())
+        fingerprint=hashlib.sha256(json.dumps(request,sort_keys=True).encode()).hexdigest()
+        with self.db.atomic():
+            existing=self.db.one('SELECT id FROM posting_groups WHERE idempotency_key=?',(idempotency_key,))
+            if existing:
+                audit=self.db.one("SELECT after_json FROM audit_log WHERE entity_id=? AND entity='transaction' AND action='delete'",(existing['id'],))
+                if audit and json.loads(audit['after_json']).get('fingerprint')==fingerprint: return existing['id']
+                raise ValueError('This submission key was already used for different values.')
+            current=self.current_entry(group_id)
+            if expected_current and current['id']!=expected_current:
+                raise ValueError('This entry changed while the form was open. Reopen it to review the latest version.')
+            reversal=self.reverse(current['id'],tx_date,'Delete: '+reason.strip(),idempotency_key)
+            self.db.audit('transaction',reversal,'delete',before={'original':current['id']},
+                          after=request | {'original':current['id'],'reversal':reversal,'fingerprint':fingerprint})
+            return reversal
+
     def edit_entry(self, group_id, *, name, place_name, amount_paise, direction,
-                   type_key, tx_date, reason, idempotency_key, interest_paise=0, transfer_to=None):
+                   type_key, tx_date, reason, idempotency_key, interest_paise=0, transfer_to=None, expected_current=None):
         """Atomic, audit-preserving correction effective on the chosen correction date."""
         valid_date(tx_date); self._integer(amount_paise)
         self._integer(interest_paise,positive=False)
@@ -388,9 +426,11 @@ class Ledger:
                 audit=self.db.one("SELECT after_json FROM audit_log WHERE entity='transaction' AND entity_id=? AND action='edit'",(existing['id'],))
                 if audit and json.loads(audit['after_json']).get('fingerprint')==fingerprint: return existing['id']
                 raise ValueError('This submission key was already used for different values.')
-            original=self.db.one('SELECT * FROM posting_groups WHERE id=?',(group_id,))
-            if not original or original['reversal_of'] or self.db.one('SELECT id FROM posting_groups WHERE reversal_of=?',(group_id,)):
-                raise ValueError('Only a current original entry can be edited. Open its latest replacement instead.')
+            requested_group_id=group_id
+            original=self.current_entry(group_id)
+            group_id=original['id']
+            if expected_current and group_id!=expected_current:
+                raise ValueError('This entry changed while the form was open. Reopen it to review the latest version.')
             if tx_date<original['tx_date']: raise ValueError('Edit date cannot precede the original entry.')
             entries=self.db.all('SELECT * FROM entries WHERE group_id=? ORDER BY id',(group_id,))
             main=next((e for e in entries if not e['interest'] and e['type']!='transfer_in'),entries[0])
@@ -429,7 +469,7 @@ class Ledger:
                 del self._pending_edit_checks
             for account_id in pending: self._validate_principal_timeline(account_id)
             self.db.audit('transaction',replacement,'edit',before={'original':group_id},
-                          after=request | {'reversal':reversal,'replacement':replacement,'fingerprint':fingerprint})
+                          after=request | {'original':group_id,'requested_original':requested_group_id,'reversal':reversal,'replacement':replacement,'fingerprint':fingerprint})
             return replacement
 
     def reverse(self, group_id, tx_date, reason, idempotency_key):

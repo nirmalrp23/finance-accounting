@@ -141,9 +141,27 @@ def run():
             assert len(app.ledger.entries())==before+2
             assert app.ledger.cash_balance(1)==cash_before-5000
             app.transaction_detail(replacement['group_id']); app.update(); close_popups()
-            try: app.edit_entry_form(expense['group_id'])
-            except ValueError as exc: assert 'latest replacement' in str(exc)
-            else: raise AssertionError('An already replaced entry cannot be edited again')
+            # Older rows reopen the latest version and can be edited again.
+            form=app.edit_entry_form(expense['group_id']); app.update()
+            assert form.fields['party'].get()=='Water Can Refill'
+            put(form,'amount','275'); put(form,'reason','Second correction'); form.submit(); app.update(); assert not forms()
+            assert app.ledger.cash_balance(1)==cash_before-7500
+            current=app.ledger.current_entry(expense['group_id'])
+            app.show('Cash Book'); app.update()
+            app.tx_tree.selection_set(str(expense['id']))
+            form=app.delete_selected_entry(); app.update()
+            before=len(app.ledger.entries())
+            form.submit(); app.update(); assert forms() and len(app.ledger.entries())==before
+            put(form,'reason','Duplicate expense')
+            with patch('finance_ledger.ui.messagebox.askyesno',return_value=False):
+                form.submit(); app.update()
+            assert forms() and len(app.ledger.entries())==before
+            assert form.fields['reason'].get()=='Duplicate expense'
+            with patch('finance_ledger.ui.messagebox.askyesno',return_value=True):
+                form.submit(); app.update()
+            assert not forms() and len(app.ledger.entries())==before+1
+            assert app.ledger.cash_balance(1)==cash_before+20000
+            assert app.db.one('SELECT reversal_of FROM posting_groups WHERE idempotency_key IS NOT NULL AND reversal_of=?',(current['id'],))
             # Transfers retain a dedicated linked-transfer form outside daily entry.
             form=app.transfer_form(); app.update()
             put(form,'amount','5'); form.fields['cash'].select_key(1); form.fields['target'].select_key(2)
@@ -156,7 +174,7 @@ def run():
             assert form.fields['amount'].get()=='100'
             close_popups()
             assert not errors,errors
-        print('GUI SMOKE PASSED: six pages, twelve report choices, five-field text-name entry, direction buttons, automatic finance matching, free-text expenses, retention, audited editing, transfers and search.')
+        print('GUI SMOKE PASSED: six pages, twelve report choices, five-field text-name entry, direction buttons, automatic finance matching, free-text expenses, retention, repeat editing, audited deletion, transfers and search.')
         app.close()
 
 

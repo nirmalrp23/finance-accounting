@@ -367,7 +367,60 @@ class EditEntryCase(unittest.TestCase):
         self.assertEqual((row['party_name'],row['place_name'],row['finance_id']),('Corrected label','Chennai',account))
         self.assertIsNotNone(self.db.one("SELECT * FROM audit_log WHERE action='edit' AND entity_id=?",(replacement,)))
         with self.assertRaisesRegex(ValueError,'different values'): self.edit(group,place_name='Salem')
-        with self.assertRaisesRegex(ValueError,'latest replacement'): self.edit(group,idempotency_key='second-edit')
+        second=self.edit(group,idempotency_key='second-edit',amount_paise=1_300_000)
+        self.assertEqual(self.ledger.current_entry(group)['id'],second)
+        self.assertEqual(self.ledger.current_entry(reversal['id'])['id'],second)
+        self.assertEqual(self.ledger.principal(account,'2026-02-01'),400_000)
+
+    def test_repeated_edit_then_delete_latest_via_original_reference(self):
+        group=self.ledger.post_quick_entry(name='Water',place_name='Salem',amount_paise=10000,direction='OUT',type_key='general_expense',tx_date='2026-01-02',cash_id=self.cash,idempotency_key='water')
+        for index,amount in enumerate((12000,14000,18000)):
+            replacement=self.edit(group,type_key='general_expense',direction='OUT',amount_paise=amount,
+                tx_date='2026-02-0'+str(index+1),idempotency_key='repeat-'+str(index))
+            self.assertEqual(self.ledger.current_entry(group)['id'],replacement)
+        self.assertEqual(self.ledger.cash_balance(self.cash,'2026-01-31'),9_990_000)
+        self.assertEqual(self.ledger.cash_balance(self.cash,'2026-02-03'),9_982_000)
+        reversal=self.ledger.delete_entry(group,tx_date='2026-02-04',reason='Duplicate bill',idempotency_key='delete-water')
+        self.assertEqual(self.ledger.delete_entry(group,tx_date='2026-02-04',reason='Duplicate bill',idempotency_key='delete-water'),reversal)
+        self.assertEqual(self.ledger.cash_balance(self.cash,'2026-02-03'),9_982_000)
+        self.assertEqual(self.ledger.cash_balance(self.cash,'2026-02-04'),10_000_000)
+        self.assertEqual(self.db.one('SELECT reversal_of FROM posting_groups WHERE id=?',(reversal,))['reversal_of'],replacement)
+        with self.assertRaisesRegex(ValueError,'deleted or reversed'): self.ledger.current_entry(group)
+        with self.assertRaisesRegex(ValueError,'deleted or reversed'):
+            self.ledger.delete_entry(group,tx_date='2026-02-04',reason='Again',idempotency_key='delete-twice')
+        with self.assertRaisesRegex(ValueError,'different values'):
+            self.ledger.delete_entry(group,tx_date='2026-02-04',reason='Changed',idempotency_key='delete-water')
+        self.assertEqual(self.db.one("SELECT COUNT(*) n FROM audit_log WHERE action='delete'")['n'],1)
+        backup=Path(self.temp.name)/'deleted.sqlite3'; self.db.backup(backup); self.db.restore(backup)
+        self.assertEqual(self.ledger.cash_balance(self.cash,'2026-02-04'),10_000_000)
+        self.assertEqual(self.db.one("SELECT COUNT(*) n FROM audit_log WHERE action='delete'")['n'],1)
+
+    def test_deleting_dependent_principal_rolls_back_and_stale_forms_do_not_overwrite(self):
+        group,account=self.prepare()
+        counts=[self.db.one(f'SELECT COUNT(*) n FROM {t}')['n'] for t in ('posting_groups','entries','audit_log')]
+        with self.assertRaisesRegex(ValueError,'negative'):
+            self.ledger.delete_entry(group,tx_date='2026-02-01',reason='Remove original',idempotency_key='bad-delete')
+        self.assertEqual([self.db.one(f'SELECT COUNT(*) n FROM {t}')['n'] for t in ('posting_groups','entries','audit_log')],counts)
+        self.edit(group)
+        with self.assertRaisesRegex(ValueError,'changed while'):
+            self.edit(group,idempotency_key='stale-edit',expected_current=group)
+        with self.assertRaisesRegex(ValueError,'changed while'):
+            self.ledger.delete_entry(group,tx_date='2026-02-02',reason='Stale form',idempotency_key='stale-delete',expected_current=group)
+        self.assertEqual(self.ledger.principal(account,'2026-02-02'),300_000)
+
+    def test_delete_split_receipt_and_transfer_reverses_all_components(self):
+        self.ledger.post_cashbook(**self.request)
+        account=self.ledger.entries()[0]['finance_id']
+        split=self.ledger.post_cashbook(type_key='loan_repaid',amount_paise=100000,interest_paise=1000,
+            tx_date='2026-01-03',cash_id=self.cash,finance_id=account,idempotency_key='split-delete')
+        self.ledger.delete_entry(split,tx_date='2026-02-01',reason='Duplicate receipt',idempotency_key='delete-split')
+        self.assertEqual(self.ledger.principal(account,'2026-02-01'),1000000)
+        self.assertEqual(self.ledger.dashboard('2026-01-01','2026-02-28')['interest_received'],0)
+        bank=self.ledger.add_cash('Bank','bank',0,'2026-01-01')
+        transfer=self.ledger.post_cashbook(type_key='transfer_out',amount_paise=10000,tx_date='2026-01-04',cash_id=self.cash,transfer_to=bank,idempotency_key='transfer-delete')
+        self.ledger.delete_entry(transfer,tx_date='2026-02-02',reason='Duplicate transfer',idempotency_key='delete-transfer')
+        self.assertEqual(self.ledger.cash_balance(bank,'2026-02-02'),0)
+        self.assertEqual(self.ledger.cash_balance(self.cash,'2026-02-02'),9_000_000)
 
     def test_invalid_final_principal_rolls_back_reversal_replacement_and_audit(self):
         group,account=self.prepare()

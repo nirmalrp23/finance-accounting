@@ -621,6 +621,7 @@ class Application(tk.Tk):
         bar=ttk.Frame(self.content); bar.pack(fill='x',pady=(4,4))
         ttk.Label(bar,text='Entries',style='Section.TLabel').pack(side='left')
         self.tx_info=ttk.Label(bar,text='',style='Muted.TLabel'); self.tx_info.pack(side='left',padx=12)
+        ttk.Button(bar,text='Delete selected entry',command=lambda:self.guard(self.delete_selected_entry)).pack(side='right',padx=8)
         ttk.Button(bar,text='Edit selected entry',command=lambda:self.guard(self.edit_selected_entry)).pack(side='right',padx=8)
         self.tx_sort=ttk.Combobox(bar,values=['Newest first','Oldest first','Amount low to high','Amount high to low','Party','Reference'],state='readonly',width=20); self.tx_sort.set('Oldest first'); self.tx_sort.pack(side='right')
         ttk.Label(bar,text='Sort by',style='Muted.TLabel').pack(side='right',padx=8)
@@ -680,10 +681,9 @@ class Application(tk.Tk):
         return self.edit_entry_form(entry['group_id'])
 
     def edit_entry_form(self,group_id,detail_window=None):
-        group=self.db.one('SELECT * FROM posting_groups WHERE id=?',(group_id,))
+        group=self.ledger.current_entry(group_id)
+        group_id=group['id']
         rows=[r for r in self.ledger.entries() if r['group_id']==group_id]
-        if not group or group['reversal_of'] or any(r['reversed_by'] for r in rows):
-            raise ValueError('This entry was already reversed or replaced. Open the latest replacement to edit it.')
         main=next((r for r in rows if not r['interest'] and r['type']!='transfer_in'),rows[0])
         transfer=main['type']=='transfer_out'
         correction_date=max(today(),group['tx_date']); key=str(uuid.uuid4())
@@ -696,7 +696,7 @@ class Application(tk.Tk):
                 amount_paise=paise(values['amount']),direction=values['direction'],type_key=type_key,
                 tx_date=correction_date,reason=values['reason'],idempotency_key=key,
                 interest_paise=paise(values['interest']) if 'interest' in values else 0,
-                transfer_to=form.fields['target'].selected(True) if transfer else None)
+                transfer_to=form.fields['target'].selected(True) if transfer else None,expected_current=group_id)
             if detail_window and detail_window.winfo_exists(): detail_window.destroy()
             self.show(self.page)
         form=Form(self,'Edit entry',save,button='Save changes',
@@ -720,6 +720,33 @@ class Application(tk.Tk):
         update_options(); form.fit()
         return form
 
+    def delete_selected_entry(self):
+        selection=self.tx_tree.selection()
+        if not selection: raise ValueError('Select an entry to delete first.')
+        entry=next(r for r in self.tx_rows if r['id']==int(selection[0]))
+        return self.delete_entry_form(entry['group_id'])
+
+    def delete_entry_form(self,group_id,detail_window=None):
+        current=self.ledger.current_entry(group_id)
+        group_id=current['id']; key=str(uuid.uuid4())
+        rows=[r for r in self.ledger.entries() if r['group_id']==group_id]
+        main=next((r for r in rows if not r['interest'] and r['type']!='transfer_in'),rows[0])
+        summary=f'{main["party_name"] or main["particulars"] or "(no name)"} · {transaction_detail(main["type"])} · {money(main["amount_paise"])}'
+        if len(rows)>1 and any(r['interest'] for r in rows):
+            summary+=' · Linked interest '+money(sum(r['amount_paise'] for r in rows if r['interest']))
+        def save(form):
+            values=form.values(); valid_date(values['date'])
+            if not values['reason']: raise ValueError('Enter a reason for deleting this entry.')
+            if not messagebox.askyesno('Delete entry?',f'Delete {current["reference"]}?\n{summary}\n\nAll linked components will be reversed on {values["date"]}. The original and its audit history will remain.',icon='warning',parent=form):
+                raise ValueError('Deletion cancelled. Your entry was not changed.')
+            self.ledger.delete_entry(group_id,tx_date=values['date'],reason=values['reason'],idempotency_key=key,expected_current=group_id)
+            if detail_window and detail_window.winfo_exists(): detail_window.destroy()
+            self.show(self.page)
+        form=Form(self,'Delete entry',save,button='Delete entry',help_text=f'{current["reference"]} · {summary}\nDeletion reverses the financial effect and preserves audit history.')
+        form.add('date','Deletion date',max(today(),current['tx_date']))
+        form.add('reason','Reason for deletion *')
+        return form
+
     def transaction_detail(self,group_id):
         group=self.db.one('SELECT * FROM posting_groups WHERE id=?',(group_id,))
         rows=[r for r in self.ledger.entries() if r['group_id']==group_id]
@@ -739,10 +766,16 @@ class Application(tk.Tk):
             ttk.Button(body,text='View edited entry '+replacement['reference'],command=lambda:self.transaction_detail(edited_into)).pack(anchor='w')
         reversed_group=self.db.one('SELECT reference FROM posting_groups WHERE reversal_of=?',(group_id,))
         if reversed_group: ttk.Label(body,text='Reversed by '+reversed_group['reference'],foreground='#a23a30').pack(anchor='w',pady=10)
-        elif not group['reversal_of']:
+        try:
+            self.ledger.current_entry(group_id)
+        except ValueError:
+            ttk.Label(body,text='This entry is deleted or reversed. Audit history is retained.',style='Muted.TLabel').pack(anchor='w',pady=8)
+        else:
             actions=ttk.Frame(body); actions.pack(fill='x',pady=12)
             ttk.Button(actions,text='Edit entry',style='Primary.TButton',command=lambda:self.guard(lambda:self.edit_entry_form(group_id,window))).pack(side='right')
-            ttk.Button(actions,text='Reverse all linked components…',command=lambda:self.reversal_form(group_id,window)).pack(side='right',padx=8)
+            ttk.Button(actions,text='Delete entry',command=lambda:self.guard(lambda:self.delete_entry_form(group_id,window))).pack(side='right',padx=8)
+            if not reversed_group and not group['reversal_of']:
+                ttk.Button(actions,text='Reverse all linked components…',command=lambda:self.reversal_form(group_id,window)).pack(side='right',padx=8)
 
     def reversal_form(self,group_id,detail_window):
         key=str(uuid.uuid4())
